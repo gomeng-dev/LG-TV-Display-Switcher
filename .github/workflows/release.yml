@@ -39,7 +39,14 @@ jobs:
           if (-not $makensis) {
             $makensis = Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
           }
-          & $makensis installer/LG-TV-Display-Switcher.nsi
+          $appBinary = (Get-ChildItem target/release -Filter "LG*Display*Switcher*.exe" | Select-Object -First 1).FullName
+          if (-not $appBinary) {
+            Get-ChildItem target/release
+            throw "Built application executable was not found."
+          }
+          $defaultConfig = (Resolve-Path installer/DefaultConfig.cfg).Path
+          $ensureDisplayConfig = (Resolve-Path installer/EnsureDisplayConfig.ps1).Path
+          & $makensis "/DAPP_BINARY=$appBinary" "/DDEFAULT_CONFIG=$defaultConfig" "/DENSURE_DISPLAY_CONFIG=$ensureDisplayConfig" installer/LG-TV-Display-Switcher.nsi
 
       - name: Stage artifacts
         shell: pwsh

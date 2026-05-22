@@ -11,6 +11,18 @@ RequestExecutionLevel user
 !define LOG_FILE "LG-TV-Display-Switcher.log"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
+!ifndef APP_BINARY
+!define APP_BINARY "target\release\${APP_EXE}"
+!endif
+
+!ifndef DEFAULT_CONFIG
+!define DEFAULT_CONFIG "installer\DefaultConfig.cfg"
+!endif
+
+!ifndef ENSURE_DISPLAY_CONFIG
+!define ENSURE_DISPLAY_CONFIG "installer\EnsureDisplayConfig.ps1"
+!endif
+
 Name "${APP_NAME}"
 OutFile "dist\${APP_NAME}-Setup.exe"
 InstallDir "$LOCALAPPDATA\${APP_NAME}"
@@ -37,7 +49,7 @@ Section "Install"
     Pop $0
 
     DetailPrint "Installing ${APP_NAME}..."
-    File /oname=$INSTDIR\${APP_EXE} "target\release\${APP_EXE}"
+    File /oname=$INSTDIR\${APP_EXE} "${APP_BINARY}"
 
     IfFileExists "$INSTDIR\${CONFIG_FILE}" config_done 0
     IfFileExists "$INSTDIR\${LEGACY_CONFIG_FILE}" 0 write_default_config
@@ -45,7 +57,7 @@ Section "Install"
         Goto config_done
 
 write_default_config:
-    File /oname=$INSTDIR\${CONFIG_FILE} "installer\DefaultConfig.cfg"
+    File /oname=$INSTDIR\${CONFIG_FILE} "${DEFAULT_CONFIG}"
 
 config_done:
     Call EnsureDisplayConfig
@@ -71,7 +83,7 @@ SectionEnd
 Function EnsureDisplayConfig
     DetailPrint "Checking DisplayConfig dependency..."
     InitPluginsDir
-    File /oname=$PLUGINSDIR\EnsureDisplayConfig.ps1 "installer\EnsureDisplayConfig.ps1"
+    File /oname=$PLUGINSDIR\EnsureDisplayConfig.ps1 "${ENSURE_DISPLAY_CONFIG}"
     nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\EnsureDisplayConfig.ps1"'
     Pop $0
     ${If} $0 != 0
