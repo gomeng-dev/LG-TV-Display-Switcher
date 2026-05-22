@@ -1,0 +1,24 @@
+[package]
+name = "tv_guard_tray"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tv_guard_tray"
+path = "src/main.rs"
+
+[[bin]]
+name = "TVGuardTraySetup"
+path = "src/setup.rs"
+
+[dependencies]
+native-tls = "0.2"
+serde_json = "1"
+windows = { version = "0.58", features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
