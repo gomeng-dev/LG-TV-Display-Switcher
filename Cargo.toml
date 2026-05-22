@@ -1,15 +1,11 @@
 [package]
-name = "tv_guard_tray"
+name = "lg-tv-display-switcher"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "tv_guard_tray"
+name = "LG-TV-Display-Switcher"
 path = "src/main.rs"
-
-[[bin]]
-name = "TVGuardTraySetup"
-path = "src/setup.rs"
 
 [dependencies]
 native-tls = "0.2"

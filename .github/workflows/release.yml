@@ -25,33 +25,43 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build app
-        run: cargo build --release --bin tv_guard_tray
+        run: cargo build --release --bin LG-TV-Display-Switcher
 
-      - name: Build installer
-        run: cargo build --release --bin TVGuardTraySetup
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            $makensis = Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
+          }
+          & $makensis installer/LG-TV-Display-Switcher.nsi
 
       - name: Stage artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/release/tv_guard_tray.exe dist/TVGuardTray.exe
-          Copy-Item target/release/TVGuardTraySetup.exe dist/TVGuardTraySetup.exe
-          Compress-Archive -Path dist/TVGuardTray.exe, dist/TVGuardTraySetup.exe -DestinationPath dist/TVGuardTray-windows-x64.zip -Force
+          Copy-Item target/release/LG-TV-Display-Switcher.exe dist/LG-TV-Display-Switcher.exe
+          Compress-Archive -Path dist/LG-TV-Display-Switcher.exe, dist/LG-TV-Display-Switcher-Setup.exe -DestinationPath dist/LG-TV-Display-Switcher-windows-x64.zip -Force
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: TVGuardTray-windows-x64
+          name: LG-TV-Display-Switcher-windows-x64
           path: |
-            dist/TVGuardTray.exe
-            dist/TVGuardTraySetup.exe
-            dist/TVGuardTray-windows-x64.zip
+            dist/LG-TV-Display-Switcher.exe
+            dist/LG-TV-Display-Switcher-Setup.exe
+            dist/LG-TV-Display-Switcher-windows-x64.zip
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/TVGuardTray.exe
-            dist/TVGuardTraySetup.exe
-            dist/TVGuardTray-windows-x64.zip
+            dist/LG-TV-Display-Switcher.exe
+            dist/LG-TV-Display-Switcher-Setup.exe
+            dist/LG-TV-Display-Switcher-windows-x64.zip

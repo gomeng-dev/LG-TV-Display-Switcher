@@ -1,13 +1,17 @@
 # Rust build output
 /target/
+/dist/
 
 # Built binaries and installer artifacts
 /*.exe
 /*.pdb
 /*.msi
+/*.nsi.bak
 /*.zip
 
 # Local runtime configuration and logs
+/LG-TV-Display-Switcher.cfg
+/LG-TV-Display-Switcher.log
 /TVGuardTray.cfg
 /TVGuardTray.log
 

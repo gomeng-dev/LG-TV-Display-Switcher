@@ -3,17 +3,17 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::mem::size_of;
-use std::net::{TcpStream, ToSocketAddrs};
 use std::net::UdpSocket;
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use native_tls::TlsConnector;
 use serde_json::{json, Value};
-use windows::core::{Error, PCWSTR, Result};
+use windows::core::{Error, Result, PCWSTR};
 use windows::Win32::Devices::Display::{
     DestroyPhysicalMonitors, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
     GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR,
@@ -26,9 +26,8 @@ use windows::Win32::Devices::Display::{
 use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     ChangeDisplaySettingsExW, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
-    CDS_NORESET, CDS_UPDATEREGISTRY, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
-    DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS, HDC, HMONITOR,
-    MONITORINFOEXW,
+    CDS_NORESET, CDS_UPDATEREGISTRY, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
+    DM_POSITION, ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS, HDC, HMONITOR, MONITORINFOEXW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -36,16 +35,20 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
-    GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage, RegisterClassW, SetForegroundWindow,
-    SetTimer, TrackPopupMenu, TranslateMessage, HMENU, IDI_APPLICATION, MF_CHECKED, MF_DISABLED,
-    MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-    WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    GetCursorPos, GetMessageW, LoadIconW, MessageBoxW, PostQuitMessage, RegisterClassW,
+    SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, HMENU, IDI_APPLICATION,
+    MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DISABLED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
+    TPM_BOTTOMALIGN, TPM_LEFTALIGN, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
 };
 
 const TV_DEVICE_NAME: &str = r"\\.\DISPLAY3";
 const PRIMARY_DEVICE_NAME: &str = r"\\.\DISPLAY2";
 const CHECK_INTERVAL_MS: u32 = 5_000;
-const CONFIG_FILE_NAME: &str = "TVGuardTray.cfg";
+const APP_NAME: &str = "LG-TV-Display-Switcher";
+const CONFIG_FILE_NAME: &str = "LG-TV-Display-Switcher.cfg";
+const LEGACY_CONFIG_FILE_NAME: &str = "TVGuardTray.cfg";
+const LOG_FILE_NAME: &str = "LG-TV-Display-Switcher.log";
 const DEFAULT_WEBOS_PORT: u16 = 3001;
 const DEFAULT_WEBOS_TIMEOUT_MS: u64 = 1500;
 const TRAY_UID: u32 = 1;
@@ -59,7 +62,8 @@ const MENU_WAKE_TV: usize = 1003;
 const MENU_TURN_OFF_TV: usize = 1004;
 const MENU_TOGGLE_TV_POWER: usize = 1005;
 const MENU_AUTO_SWITCH_DISPLAYS: usize = 1006;
-const MENU_EXIT: usize = 1007;
+const MENU_RUN_ONBOARDING: usize = 1007;
+const MENU_EXIT: usize = 1008;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 static APP: OnceLock<Mutex<AppState>> = OnceLock::new();
@@ -69,6 +73,7 @@ struct AppState {
     config: AppConfig,
     last_status: String,
     last_tv_on: Option<bool>,
+    onboarding_started: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +87,9 @@ struct AppConfig {
     wake_broadcast: String,
     wake_port: u16,
     webos_client_key: Option<String>,
+    auto_switch_audio: bool,
+    tv_audio_device_name_contains: Option<String>,
+    try_enable_dolby_atmos: bool,
 }
 
 #[derive(Debug)]
@@ -103,12 +111,13 @@ fn main() -> Result<()> {
         config,
         last_status: "Starting".to_string(),
         last_tv_on: None,
+        onboarding_started: false,
     }))
     .ok();
 
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        let class_name = wide("TvGuardTrayWindow");
+        let class_name = wide("LgTvDisplaySwitcherWindow");
 
         let window_class = WNDCLASSW {
             hInstance: HINSTANCE(instance.0),
@@ -122,7 +131,7 @@ fn main() -> Result<()> {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             PCWSTR(class_name.as_ptr()),
-            PCWSTR(wide("TV Guard Tray").as_ptr()),
+            PCWSTR(wide(APP_NAME).as_ptr()),
             WINDOW_STYLE::default(),
             0,
             0,
@@ -136,6 +145,7 @@ fn main() -> Result<()> {
 
         add_tray_icon(hwnd)?;
         SetTimer(hwnd, TIMER_ID, CHECK_INTERVAL_MS, None);
+        run_onboarding_if_needed();
         check_and_apply_pc_mode_if_needed();
 
         let mut message = MSG::default();
@@ -150,7 +160,12 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_TIMER => {
             if wparam.0 == TIMER_ID {
@@ -178,6 +193,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 MENU_TURN_OFF_TV => turn_off_tv_from_state(),
                 MENU_TOGGLE_TV_POWER => toggle_tv_power_from_state(),
                 MENU_AUTO_SWITCH_DISPLAYS => toggle_auto_switch_displays(),
+                MENU_RUN_ONBOARDING => run_onboarding_from_state(),
                 MENU_EXIT => {
                     remove_tray_icon(hwnd);
                     PostQuitMessage(0);
@@ -197,7 +213,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
 fn check_and_apply_pc_mode_if_needed() {
     match read_tv_power() {
-        Ok(TvPower::OutputInactive) => update_tv_state(false, "DISPLAY3 inactive; PC mode already likely active".to_string()),
+        Ok(TvPower::OutputInactive) => update_tv_state(
+            false,
+            "DISPLAY3 inactive; PC mode already likely active".to_string(),
+        ),
         Ok(TvPower::On) => update_tv_state(true, "TV is on".to_string()),
         Ok(TvPower::NotOn { code, reason }) => {
             let status = match code {
@@ -242,29 +261,24 @@ fn current_tv_on() -> Option<bool> {
 
 fn auto_switch_displays() -> bool {
     APP.get()
-        .and_then(|state| state.lock().ok().map(|state| state.config.auto_switch_displays))
+        .and_then(|state| {
+            state
+                .lock()
+                .ok()
+                .map(|state| state.config.auto_switch_displays)
+        })
         .unwrap_or(false)
 }
 
 fn load_or_create_config(base_dir: &Path) -> AppConfig {
     let path = base_dir.join(CONFIG_FILE_NAME);
     if !path.exists() {
-        let template = [
-            "# LG webOS TV address. Prefer a fixed IP from your router, for example: WebOsHost=192.168.0.50",
-            "# Hostname lgwebostv sometimes works, but a fixed IP is more reliable.",
-            "WebOsHost=lgwebostv",
-            "WebOsPort=3001",
-            "WebOsTimeoutMs=1500",
-            "AutoApplyPcMode=false",
-            "AutoSwitchDisplays=false",
-            "TvMac=",
-            "WakeBroadcast=192.168.0.255",
-            "WakePort=9",
-            "WebOsClientKey=",
-            "",
-        ]
-        .join("\r\n");
-        let _ = std::fs::write(&path, template);
+        let legacy_path = base_dir.join(LEGACY_CONFIG_FILE_NAME);
+        if legacy_path.exists() {
+            let _ = std::fs::copy(&legacy_path, &path);
+        } else {
+            let _ = std::fs::write(&path, default_config_template());
+        }
     }
 
     let mut config = AppConfig {
@@ -277,6 +291,9 @@ fn load_or_create_config(base_dir: &Path) -> AppConfig {
         wake_broadcast: "192.168.0.255".to_string(),
         wake_port: 9,
         webos_client_key: None,
+        auto_switch_audio: true,
+        tv_audio_device_name_contains: Some("NVIDIA High Definition Audio".to_string()),
+        try_enable_dolby_atmos: false,
     };
 
     let Ok(contents) = std::fs::read_to_string(path) else {
@@ -338,6 +355,22 @@ fn load_or_create_config(base_dir: &Path) -> AppConfig {
             "webosclientkey" => {
                 config.webos_client_key = (!value.is_empty()).then(|| value.to_string());
             }
+            "autoswitchaudio" => {
+                config.auto_switch_audio = matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "yes" | "true" | "on"
+                );
+            }
+            "tvaudiodevicenamecontains" => {
+                config.tv_audio_device_name_contains =
+                    (!value.is_empty()).then(|| value.to_string());
+            }
+            "tryenabledolbyatmos" => {
+                config.try_enable_dolby_atmos = matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "yes" | "true" | "on"
+                );
+            }
             _ => {}
         }
     }
@@ -345,22 +378,44 @@ fn load_or_create_config(base_dir: &Path) -> AppConfig {
     config
 }
 
+fn default_config_template() -> String {
+    [
+        "# LG webOS TV address. Prefer a fixed IP from your router, for example: WebOsHost=192.168.0.50",
+        "# Hostname lgwebostv sometimes works, but a fixed IP is more reliable.",
+        "WebOsHost=lgwebostv",
+        "WebOsPort=3001",
+        "WebOsTimeoutMs=1500",
+        "AutoApplyPcMode=false",
+        "AutoSwitchDisplays=false",
+        "TvMac=",
+        "WakeBroadcast=192.168.0.255",
+        "WakePort=9",
+        "WebOsClientKey=",
+        "AutoSwitchAudio=true",
+        "TvAudioDeviceNameContains=NVIDIA High Definition Audio",
+        "TryEnableDolbyAtmos=false",
+        "",
+    ]
+    .join("\r\n")
+}
+
 fn wake_tv_from_state() {
-    let config = APP
-        .get()
-        .and_then(|state| {
-            state.lock().ok().map(|state| AppConfig {
-                webos_host: state.config.webos_host.clone(),
-                webos_port: state.config.webos_port,
-                webos_timeout: state.config.webos_timeout,
-                auto_apply_pc_mode: state.config.auto_apply_pc_mode,
-                auto_switch_displays: state.config.auto_switch_displays,
-                tv_mac: state.config.tv_mac,
-                wake_broadcast: state.config.wake_broadcast.clone(),
-                wake_port: state.config.wake_port,
-                webos_client_key: state.config.webos_client_key.clone(),
-            })
-        });
+    let config = APP.get().and_then(|state| {
+        state.lock().ok().map(|state| AppConfig {
+            webos_host: state.config.webos_host.clone(),
+            webos_port: state.config.webos_port,
+            webos_timeout: state.config.webos_timeout,
+            auto_apply_pc_mode: state.config.auto_apply_pc_mode,
+            auto_switch_displays: state.config.auto_switch_displays,
+            tv_mac: state.config.tv_mac,
+            wake_broadcast: state.config.wake_broadcast.clone(),
+            wake_port: state.config.wake_port,
+            webos_client_key: state.config.webos_client_key.clone(),
+            auto_switch_audio: state.config.auto_switch_audio,
+            tv_audio_device_name_contains: state.config.tv_audio_device_name_contains.clone(),
+            try_enable_dolby_atmos: state.config.try_enable_dolby_atmos,
+        })
+    });
 
     let Some(config) = config else {
         set_status("Wake TV failed: config unavailable");
@@ -457,7 +512,10 @@ fn turn_off_tv_from_state() {
 trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
 
-fn turn_off_webos_tv(host: &str, config: &mut AppConfig) -> std::result::Result<Option<String>, String> {
+fn turn_off_webos_tv(
+    host: &str,
+    config: &mut AppConfig,
+) -> std::result::Result<Option<String>, String> {
     let timeout = if config.webos_client_key.is_some() {
         config.webos_timeout
     } else {
@@ -520,7 +578,11 @@ fn connect_webos_socket(
     }
 }
 
-fn websocket_upgrade(stream: &mut dyn ReadWrite, host: &str, port: u16) -> std::result::Result<(), String> {
+fn websocket_upgrade(
+    stream: &mut dyn ReadWrite,
+    host: &str,
+    port: u16,
+) -> std::result::Result<(), String> {
     let request = format!(
         "GET / HTTP/1.1\r\n\
          Host: {host}:{port}\r\n\
@@ -579,8 +641,8 @@ fn register_webos_client(
                 "created": "20260523",
                 "appId": "com.local.tvguardtray",
                 "vendorId": "com.local",
-                "localizedAppNames": { "": "TV Guard Tray" },
-                "localizedVendorNames": { "": "TV Guard Tray" },
+                "localizedAppNames": { "": APP_NAME },
+                "localizedVendorNames": { "": APP_NAME },
                 "permissions": permissions,
                 "serial": "tvguardtray"
             },
@@ -699,7 +761,10 @@ fn read_ws_text(stream: &mut dyn ReadWrite) -> std::result::Result<String, Strin
         }
 
         match opcode {
-            0x1 => return String::from_utf8(payload).map_err(|error| format!("webOS websocket text invalid: {error}")),
+            0x1 => {
+                return String::from_utf8(payload)
+                    .map_err(|error| format!("webOS websocket text invalid: {error}"))
+            }
             0x8 => return Err("webOS websocket closed".to_string()),
             0x9 | 0xA => continue,
             _ => continue,
@@ -757,6 +822,409 @@ fn save_config_value(key: &str, value: &str) {
     let _ = std::fs::write(path, format!("{}\r\n", lines.join("\r\n")));
 }
 
+fn run_onboarding_if_needed() {
+    let should_run = APP
+        .get()
+        .and_then(|state| {
+            state.lock().ok().map(|mut state| {
+                if state.onboarding_started || !onboarding_needed(&state.config) {
+                    false
+                } else {
+                    state.onboarding_started = true;
+                    true
+                }
+            })
+        })
+        .unwrap_or(false);
+
+    if should_run {
+        run_onboarding_from_state();
+    }
+}
+
+fn onboarding_needed(config: &AppConfig) -> bool {
+    let host_missing = config
+        .webos_host
+        .as_deref()
+        .map(|host| host.trim().is_empty() || host.eq_ignore_ascii_case("lgwebostv"))
+        .unwrap_or(true);
+
+    host_missing || config.webos_client_key.is_none()
+}
+
+fn run_onboarding_from_state() {
+    set_status("Onboarding started");
+    show_info(
+        APP_NAME,
+        "LG TV onboarding will search the local network, connect to the TV, and ask for pairing approval on the TV screen.\n\nTurn the TV on and approve the prompt when it appears.",
+    );
+
+    match run_onboarding() {
+        Ok(report) => {
+            set_status("Onboarding completed");
+            show_info(APP_NAME, &report);
+        }
+        Err(error) => {
+            set_status(format!("Onboarding failed: {error}"));
+            show_info(APP_NAME, &format!("Onboarding failed:\n{error}"));
+        }
+    }
+}
+
+fn run_onboarding() -> std::result::Result<String, String> {
+    let config = APP
+        .get()
+        .and_then(|state| state.lock().ok().map(|state| state.config.clone()))
+        .ok_or_else(|| "config unavailable".to_string())?;
+
+    let mut candidates = Vec::<String>::new();
+    if let Some(host) = config.webos_host.as_deref() {
+        if !host.trim().is_empty() && !host.eq_ignore_ascii_case("lgwebostv") {
+            candidates.push(host.to_string());
+        }
+    }
+
+    set_status("Searching for LG webOS TVs on the local network");
+    for ip in discover_lg_webos_tvs(Duration::from_secs(3)) {
+        push_unique(&mut candidates, ip.to_string());
+    }
+
+    if let Some(host) = config.webos_host.as_deref() {
+        if !host.trim().is_empty() {
+            push_unique(&mut candidates, host.to_string());
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err("No LG webOS TV was found. Check that the TV is on and connected to the same local network.".to_string());
+    }
+
+    let mut ports = Vec::new();
+    for port in [config.webos_port, 3001, 3000] {
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+
+    let mut found = None;
+    for host in &candidates {
+        for port in &ports {
+            set_status(format!("Checking webOS TV at {host}:{port}"));
+            if matches!(
+                read_webos_power(host, *port, Duration::from_millis(2500)),
+                TvPower::On
+            ) {
+                found = Some((host.clone(), *port));
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+
+    let Some((host, port)) = found else {
+        return Err(format!(
+            "Found candidates, but none accepted a webOS connection: {}",
+            candidates.join(", ")
+        ));
+    };
+
+    save_config_value("WebOsHost", &host);
+    save_config_value("WebOsPort", &port.to_string());
+    if let Some(state) = APP.get() {
+        if let Ok(mut state) = state.lock() {
+            state.config.webos_host = Some(host.clone());
+            state.config.webos_port = port;
+        }
+    }
+
+    set_status("Pairing with webOS TV; approve the prompt on the TV");
+    let client_key = pair_webos_tv(&host, port, config.webos_client_key.as_deref())?;
+    if let Some(client_key) = client_key {
+        save_webos_client_key(&client_key);
+        if let Some(state) = APP.get() {
+            if let Ok(mut state) = state.lock() {
+                state.config.webos_client_key = Some(client_key);
+            }
+        }
+    }
+
+    let mut notes = Vec::new();
+    notes.push(format!("TV: {host}:{port}"));
+
+    set_status("Applying TV display mode before audio endpoint scan");
+    match run_embedded_display_config_script(embedded_tv_mode_script()) {
+        Ok(()) => {
+            notes.push("Display mode: TV mode applied".to_string());
+            std::thread::sleep(Duration::from_millis(1200));
+        }
+        Err(error) => {
+            notes.push(format!("Display mode: skipped ({error})"));
+            log_message(&format!("Onboarding TV mode apply failed: {error}"));
+        }
+    }
+
+    set_status("Scanning active audio output devices");
+    match list_audio_output_names() {
+        Ok(names) if !names.is_empty() => {
+            for name in &names {
+                log_message(&format!("Audio endpoint: {name}"));
+            }
+
+            if let Some(selected) =
+                choose_tv_audio_endpoint(&names, config.tv_audio_device_name_contains.as_deref())
+            {
+                save_config_value("TvAudioDeviceNameContains", &selected);
+                if let Some(state) = APP.get() {
+                    if let Ok(mut state) = state.lock() {
+                        state.config.tv_audio_device_name_contains = Some(selected.clone());
+                    }
+                }
+                notes.push(format!("TV audio endpoint: {selected}"));
+            } else {
+                notes.push(format!("Audio endpoints found: {}", names.join(", ")));
+            }
+        }
+        Ok(_) => notes.push("Audio endpoint scan found no active output devices".to_string()),
+        Err(error) => {
+            notes.push(format!("Audio endpoint scan failed: {error}"));
+            log_message(&format!("Audio endpoint scan failed: {error}"));
+        }
+    }
+
+    Ok(format!("Onboarding completed.\n\n{}", notes.join("\n")))
+}
+
+fn pair_webos_tv(
+    host: &str,
+    port: u16,
+    existing_key: Option<&str>,
+) -> std::result::Result<Option<String>, String> {
+    let timeout = if existing_key.is_some() {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(30)
+    };
+    let mut stream = connect_webos_socket(host, port, timeout)?;
+    register_webos_client(&mut *stream, existing_key)
+}
+
+fn discover_lg_webos_tvs(duration: Duration) -> Vec<IpAddr> {
+    let mut found = Vec::<IpAddr>::new();
+    let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+        return found;
+    };
+
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(350)));
+    let _ = socket.set_multicast_loop_v4(false);
+
+    let searches = [
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n",
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: urn:lge-com:service:webos-second-screen:1\r\n\r\n",
+    ];
+
+    for search in searches {
+        let _ = socket.send_to(search.as_bytes(), "239.255.255.250:1900");
+    }
+
+    let deadline = Instant::now() + duration;
+    let mut buffer = [0u8; 4096];
+    while Instant::now() < deadline {
+        match socket.recv_from(&mut buffer) {
+            Ok((size, sender)) => {
+                let response = String::from_utf8_lossy(&buffer[..size]).to_ascii_lowercase();
+                if response.contains("webos")
+                    || response.contains("lge")
+                    || response.contains("lg smart")
+                {
+                    let ip = sender.ip();
+                    if !found.contains(&ip) {
+                        found.push(ip);
+                    }
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => {
+                log_message(&format!("SSDP discovery failed: {error}"));
+                break;
+            }
+        }
+    }
+
+    found
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(&value))
+    {
+        values.push(value);
+    }
+}
+
+fn choose_tv_audio_endpoint(names: &[String], preferred: Option<&str>) -> Option<String> {
+    if let Some(preferred) = preferred {
+        if !preferred.trim().is_empty() {
+            if let Some(name) = names.iter().find(|name| {
+                name.to_ascii_lowercase()
+                    .contains(&preferred.to_ascii_lowercase())
+            }) {
+                return Some(name.clone());
+            }
+        }
+    }
+
+    for marker in [
+        "LG",
+        "TV",
+        "NVIDIA High Definition Audio",
+        "HDMI",
+        "Digital Audio",
+    ] {
+        let marker = marker.to_ascii_lowercase();
+        if let Some(name) = names
+            .iter()
+            .find(|name| name.to_ascii_lowercase().contains(&marker))
+        {
+            return Some(name.clone());
+        }
+    }
+
+    names.first().cloned()
+}
+
+fn list_audio_output_names() -> std::result::Result<Vec<String>, String> {
+    let script = r#"
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public enum EDataFlow { eRender, eCapture, eAll }
+[Flags] public enum DeviceState : uint { Active = 0x00000001 }
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+public class MMDeviceEnumerator {}
+
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator {
+    int EnumAudioEndpoints(EDataFlow dataFlow, DeviceState dwStateMask, out IMMDeviceCollection ppDevices);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-C0E9422C1607"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceCollection {
+    int GetCount(out uint pcDevices);
+    int Item(uint nDevice, out IMMDevice ppDevice);
+}
+
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice {
+    int Activate(ref Guid iid, uint dwClsCtx, IntPtr pActivationParams, out IntPtr ppInterface);
+    int OpenPropertyStore(uint stgmAccess, out IPropertyStore ppProperties);
+    int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+    int GetState(out uint pdwState);
+}
+
+[ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPropertyStore {
+    int GetCount(out uint cProps);
+    int GetAt(uint iProp, out PROPERTYKEY pkey);
+    int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+    int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
+    int Commit();
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+
+[StructLayout(LayoutKind.Sequential)]
+public struct PROPVARIANT { public ushort vt; public ushort w1; public ushort w2; public ushort w3; public IntPtr p; public int p2; }
+
+public class AudioEndpointLister {
+    static PROPERTYKEY PKEY_Device_FriendlyName = new PROPERTYKEY {
+        fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"),
+        pid = 14
+    };
+
+    static string GetString(IPropertyStore store, PROPERTYKEY key) {
+        PROPVARIANT pv;
+        store.GetValue(ref key, out pv);
+        if (pv.vt == 31 && pv.p != IntPtr.Zero) return Marshal.PtrToStringUni(pv.p);
+        return "";
+    }
+
+    public static string[] ListRenderNames() {
+        var names = new List<string>();
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        IMMDeviceCollection devices;
+        Marshal.ThrowExceptionForHR(enumerator.EnumAudioEndpoints(EDataFlow.eRender, DeviceState.Active, out devices));
+
+        uint count;
+        Marshal.ThrowExceptionForHR(devices.GetCount(out count));
+
+        for (uint i = 0; i < count; i++) {
+            IMMDevice device;
+            Marshal.ThrowExceptionForHR(devices.Item(i, out device));
+
+            IPropertyStore store;
+            Marshal.ThrowExceptionForHR(device.OpenPropertyStore(0, out store));
+            string name = GetString(store, PKEY_Device_FriendlyName);
+            if (!String.IsNullOrWhiteSpace(name)) names.Add(name);
+        }
+
+        return names.ToArray();
+    }
+}
+"@
+
+[AudioEndpointLister]::ListRenderNames()
+"#;
+
+    let output = Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("failed to start PowerShell: {error}"))?;
+
+    if output.status.success() {
+        let names = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        Ok(names)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!("PowerShell exited with {}", output.status))
+        } else {
+            Err(stderr)
+        }
+    }
+}
+
+fn show_info(title: &str, message: &str) {
+    let title = wide(title);
+    let message = wide(message);
+    unsafe {
+        let _ = MessageBoxW(
+            HWND::default(),
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
 fn send_wake_on_lan(mac: [u8; 6], broadcast: &str, port: u16) -> std::io::Result<()> {
     let mut packet = [0u8; 102];
     packet[..6].fill(0xff);
@@ -798,7 +1266,9 @@ fn apply_pc_mode_from_state() {
                     log_message(&format!("Native DisplayConfig apply failed, trying ChangeDisplaySettingsEx fallback: {error}"));
                     match apply_pc_mode_change_display_settings() {
                         Ok(()) => set_status("PC mode applied with ChangeDisplaySettingsEx"),
-                        Err(fallback_error) => set_status(format!("Failed to apply PC mode: {fallback_error}")),
+                        Err(fallback_error) => {
+                            set_status(format!("Failed to apply PC mode: {fallback_error}"))
+                        }
                     }
                 }
             }
@@ -808,8 +1278,193 @@ fn apply_pc_mode_from_state() {
 
 fn apply_tv_mode_from_state() {
     match run_embedded_display_config_script(embedded_tv_mode_script()) {
-        Ok(()) => set_status("TV mode applied"),
+        Ok(()) => {
+            set_status("TV mode applied");
+            apply_tv_audio_from_state();
+        }
         Err(error) => set_status(format!("Failed to apply TV mode: {error}")),
+    }
+}
+
+fn apply_tv_audio_from_state() {
+    let config = APP
+        .get()
+        .and_then(|state| state.lock().ok().map(|state| state.config.clone()));
+
+    let Some(config) = config else {
+        set_status("TV audio switch skipped: config unavailable");
+        return;
+    };
+
+    if !config.auto_switch_audio {
+        return;
+    }
+
+    let Some(name_filter) = config.tv_audio_device_name_contains.as_deref() else {
+        set_status("TV audio switch skipped: TvAudioDeviceNameContains is not configured");
+        return;
+    };
+
+    match set_default_audio_output_by_name(name_filter) {
+        Ok(device_name) => {
+            set_status(format!("Default audio output set to {device_name}"));
+            if config.try_enable_dolby_atmos {
+                set_status("Dolby Atmos auto-enable is not implemented; set it once in Windows spatial sound settings");
+            }
+        }
+        Err(error) => set_status(format!("Failed to switch TV audio output: {error}")),
+    }
+}
+
+fn set_default_audio_output_by_name(name_filter: &str) -> std::result::Result<String, String> {
+    let script = r#"
+param([string] $NameFilter)
+
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public enum EDataFlow { eRender, eCapture, eAll }
+public enum ERole { eConsole, eMultimedia, eCommunications }
+[Flags] public enum DeviceState : uint { Active = 0x00000001 }
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+public class MMDeviceEnumerator {}
+
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceEnumerator {
+    int EnumAudioEndpoints(EDataFlow dataFlow, DeviceState dwStateMask, out IMMDeviceCollection ppDevices);
+}
+
+[ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-C0E9422C1607"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDeviceCollection {
+    int GetCount(out uint pcDevices);
+    int Item(uint nDevice, out IMMDevice ppDevice);
+}
+
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IMMDevice {
+    int Activate(ref Guid iid, uint dwClsCtx, IntPtr pActivationParams, out IntPtr ppInterface);
+    int OpenPropertyStore(uint stgmAccess, out IPropertyStore ppProperties);
+    int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+    int GetState(out uint pdwState);
+}
+
+[ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPropertyStore {
+    int GetCount(out uint cProps);
+    int GetAt(uint iProp, out PROPERTYKEY pkey);
+    int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+    int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
+    int Commit();
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+
+[StructLayout(LayoutKind.Sequential)]
+public struct PROPVARIANT { public ushort vt; public ushort w1; public ushort w2; public ushort w3; public IntPtr p; public int p2; }
+
+[ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+public class PolicyConfigClient {}
+
+[ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPolicyConfig {
+    int GetMixFormat();
+    int GetDeviceFormat();
+    int SetDeviceFormat();
+    int GetProcessingPeriod();
+    int SetProcessingPeriod();
+    int GetShareMode();
+    int SetShareMode();
+    int GetPropertyValue();
+    int SetPropertyValue();
+    int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string wszDeviceId, ERole role);
+    int SetEndpointVisibility();
+}
+
+public class AudioSwitcher {
+    static PROPERTYKEY PKEY_Device_FriendlyName = new PROPERTYKEY {
+        fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"),
+        pid = 14
+    };
+
+    static string GetString(IPropertyStore store, PROPERTYKEY key) {
+        PROPVARIANT pv;
+        store.GetValue(ref key, out pv);
+        if (pv.vt == 31 && pv.p != IntPtr.Zero) return Marshal.PtrToStringUni(pv.p);
+        return "";
+    }
+
+    public static string SetDefaultByName(string nameFilter) {
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        IMMDeviceCollection devices;
+        Marshal.ThrowExceptionForHR(enumerator.EnumAudioEndpoints(EDataFlow.eRender, DeviceState.Active, out devices));
+
+        uint count;
+        Marshal.ThrowExceptionForHR(devices.GetCount(out count));
+
+        string bestId = null;
+        string bestName = null;
+
+        for (uint i = 0; i < count; i++) {
+            IMMDevice device;
+            Marshal.ThrowExceptionForHR(devices.Item(i, out device));
+
+            string id;
+            Marshal.ThrowExceptionForHR(device.GetId(out id));
+
+            IPropertyStore store;
+            Marshal.ThrowExceptionForHR(device.OpenPropertyStore(0, out store));
+            string name = GetString(store, PKEY_Device_FriendlyName);
+
+            if (!String.IsNullOrWhiteSpace(name) && name.IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) >= 0) {
+                bestId = id;
+                bestName = name;
+                break;
+            }
+        }
+
+        if (bestId == null) throw new InvalidOperationException("No active render endpoint matched: " + nameFilter);
+
+        var policy = (IPolicyConfig)new PolicyConfigClient();
+        Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(bestId, ERole.eConsole));
+        Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(bestId, ERole.eMultimedia));
+        Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(bestId, ERole.eCommunications));
+        return bestName;
+    }
+}
+"@
+
+[AudioSwitcher]::SetDefaultByName($NameFilter)
+"#;
+
+    let output = Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .arg("-NameFilter")
+        .arg(name_filter)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("failed to start PowerShell: {error}"))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            Ok(name_filter.to_string())
+        } else {
+            Ok(stdout)
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!("PowerShell exited with {}", output.status))
+        } else {
+            Err(stderr)
+        }
     }
 }
 
@@ -866,11 +1521,15 @@ fn apply_pc_mode_change_display_settings() -> std::result::Result<(), String> {
 
         match current_devmode(r"\\.\DISPLAY1") {
             Ok(display1) => {
-                if let Err(error) = set_display_position(r"\\.\DISPLAY1", -(display1.dmPelsWidth as i32), 0) {
+                if let Err(error) =
+                    set_display_position(r"\\.\DISPLAY1", -(display1.dmPelsWidth as i32), 0)
+                {
                     log_message(&format!("DISPLAY1 reposition skipped: {error}"));
                 }
             }
-            Err(error) => log_message(&format!("DISPLAY1 current mode not available, skipped: {error}")),
+            Err(error) => log_message(&format!(
+                "DISPLAY1 current mode not available, skipped: {error}"
+            )),
         }
 
         disable_display(TV_DEVICE_NAME)?;
@@ -883,7 +1542,10 @@ fn apply_pc_mode_change_display_settings() -> std::result::Result<(), String> {
             None,
         );
         if apply_rc != DISP_CHANGE_SUCCESSFUL {
-            return Err(format!("final ChangeDisplaySettingsEx apply failed: {}", apply_rc.0));
+            return Err(format!(
+                "final ChangeDisplaySettingsEx apply failed: {}",
+                apply_rc.0
+            ));
         }
     }
 
@@ -894,16 +1556,32 @@ unsafe fn current_devmode(device_name: &str) -> std::result::Result<DEVMODEW, St
     let mut mode = DEVMODEW::default();
     mode.dmSize = size_of::<DEVMODEW>() as u16;
     let device_name = wide(device_name);
-    if EnumDisplaySettingsW(PCWSTR(device_name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode).as_bool() {
+    if EnumDisplaySettingsW(
+        PCWSTR(device_name.as_ptr()),
+        ENUM_CURRENT_SETTINGS,
+        &mut mode,
+    )
+    .as_bool()
+    {
         Ok(mode)
-    } else if EnumDisplaySettingsW(PCWSTR(device_name.as_ptr()), ENUM_REGISTRY_SETTINGS, &mut mode).as_bool() {
+    } else if EnumDisplaySettingsW(
+        PCWSTR(device_name.as_ptr()),
+        ENUM_REGISTRY_SETTINGS,
+        &mut mode,
+    )
+    .as_bool()
+    {
         Ok(mode)
     } else {
         Err(format!("EnumDisplaySettingsW failed for {device_name:?}"))
     }
 }
 
-unsafe fn set_display_position(device_name: &str, x: i32, y: i32) -> std::result::Result<(), String> {
+unsafe fn set_display_position(
+    device_name: &str,
+    x: i32,
+    y: i32,
+) -> std::result::Result<(), String> {
     let mut mode = current_devmode(device_name)?;
     mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
     mode.Anonymous1.Anonymous2.dmPosition.x = x;
@@ -920,7 +1598,10 @@ unsafe fn set_display_position(device_name: &str, x: i32, y: i32) -> std::result
     if rc == DISP_CHANGE_SUCCESSFUL {
         Ok(())
     } else {
-        Err(format!("ChangeDisplaySettingsEx position failed for {device_name}: {}", rc.0))
+        Err(format!(
+            "ChangeDisplaySettingsEx position failed for {device_name}: {}",
+            rc.0
+        ))
     }
 }
 
@@ -944,7 +1625,10 @@ unsafe fn disable_display(device_name: &str) -> std::result::Result<(), String> 
     if rc == DISP_CHANGE_SUCCESSFUL {
         Ok(())
     } else {
-        Err(format!("ChangeDisplaySettingsEx disable failed for {device_name}: {}", rc.0))
+        Err(format!(
+            "ChangeDisplaySettingsEx disable failed for {device_name}: {}",
+            rc.0
+        ))
     }
 }
 
@@ -983,14 +1667,12 @@ fn apply_pc_mode_native() -> Result<()> {
     }
 }
 
-unsafe fn query_active_display_config() -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>)> {
+unsafe fn query_active_display_config(
+) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>)> {
     let mut path_count = 0;
     let mut mode_count = 0;
-    let size_rc = GetDisplayConfigBufferSizes(
-        QDC_ONLY_ACTIVE_PATHS,
-        &mut path_count,
-        &mut mode_count,
-    );
+    let size_rc =
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count);
     if size_rc.0 != 0 {
         return Err(Error::from_win32());
     }
@@ -1016,11 +1698,8 @@ unsafe fn query_active_display_config() -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>,
             return Ok((paths, modes));
         }
 
-        let resize_rc = GetDisplayConfigBufferSizes(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut path_count,
-            &mut mode_count,
-        );
+        let resize_rc =
+            GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count);
         if resize_rc.0 != 0 {
             return Err(Error::from_win32());
         }
@@ -1051,13 +1730,19 @@ unsafe fn remap_modes_for_paths(
 
     for path in paths.iter() {
         let source_idx = path.sourceInfo.Anonymous.modeInfoIdx;
-        if source_idx != u32::MAX && (source_idx as usize) < modes.len() && !remap.contains_key(&source_idx) {
+        if source_idx != u32::MAX
+            && (source_idx as usize) < modes.len()
+            && !remap.contains_key(&source_idx)
+        {
             remap.insert(source_idx, new_modes.len() as u32);
             new_modes.push(modes[source_idx as usize]);
         }
 
         let target_idx = path.targetInfo.Anonymous.modeInfoIdx;
-        if target_idx != u32::MAX && (target_idx as usize) < modes.len() && !remap.contains_key(&target_idx) {
+        if target_idx != u32::MAX
+            && (target_idx as usize) < modes.len()
+            && !remap.contains_key(&target_idx)
+        {
             remap.insert(target_idx, new_modes.len() as u32);
             new_modes.push(modes[target_idx as usize]);
         }
@@ -1103,7 +1788,9 @@ unsafe fn set_primary_position(
 
     let mut next_left_x = 0i32;
     for (idx, (_, mode_idx, _)) in ordered.iter().enumerate() {
-        if *mode_idx >= modes.len() || modes[*mode_idx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+        if *mode_idx >= modes.len()
+            || modes[*mode_idx].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE
+        {
             continue;
         }
 
@@ -1137,7 +1824,7 @@ fn log_message(message: &str) {
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let log_path = base_dir.join("TVGuardTray.log");
+    let log_path = base_dir.join(LOG_FILE_NAME);
     let line = format!("{:?} {message}\r\n", std::time::SystemTime::now());
     let _ = std::fs::OpenOptions::new()
         .create(true)
@@ -1166,6 +1853,9 @@ fn read_tv_power() -> Result<TvPower> {
                 wake_broadcast: state.config.wake_broadcast.clone(),
                 wake_port: state.config.wake_port,
                 webos_client_key: state.config.webos_client_key.clone(),
+                auto_switch_audio: state.config.auto_switch_audio,
+                tv_audio_device_name_contains: state.config.tv_audio_device_name_contains.clone(),
+                try_enable_dolby_atmos: state.config.try_enable_dolby_atmos,
             })
         })
         .unwrap_or(AppConfig {
@@ -1178,10 +1868,17 @@ fn read_tv_power() -> Result<TvPower> {
             wake_broadcast: "192.168.0.255".to_string(),
             wake_port: 9,
             webos_client_key: None,
+            auto_switch_audio: true,
+            tv_audio_device_name_contains: Some("NVIDIA High Definition Audio".to_string()),
+            try_enable_dolby_atmos: false,
         });
 
     if let Some(host) = config.webos_host.as_deref() {
-        return Ok(read_webos_power(host, config.webos_port, config.webos_timeout));
+        return Ok(read_webos_power(
+            host,
+            config.webos_port,
+            config.webos_timeout,
+        ));
     }
 
     if is_display_active(TV_DEVICE_NAME) {
@@ -1294,7 +1991,9 @@ fn read_webos_power(host: &str, port: u16, timeout: Duration) -> TvPower {
     match stream.read(&mut response) {
         Ok(size) if size > 0 => {
             let response_text = String::from_utf8_lossy(&response[..size]);
-            if response_text.starts_with("HTTP/1.1 101") || response_text.starts_with("HTTP/1.0 101") {
+            if response_text.starts_with("HTTP/1.1 101")
+                || response_text.starts_with("HTTP/1.0 101")
+            {
                 TvPower::On
             } else {
                 TvPower::NotOn {
@@ -1364,7 +2063,9 @@ fn read_webos_power_tls(host: &str, port: u16, timeout: Duration, stream: TcpStr
     match tls.read(&mut response) {
         Ok(size) if size > 0 => {
             let response_text = String::from_utf8_lossy(&response[..size]);
-            if response_text.starts_with("HTTP/1.1 101") || response_text.starts_with("HTTP/1.0 101") {
+            if response_text.starts_with("HTTP/1.1 101")
+                || response_text.starts_with("HTTP/1.0 101")
+            {
                 TvPower::On
             } else {
                 TvPower::NotOn {
@@ -1518,7 +2219,7 @@ unsafe fn add_tray_icon(hwnd: HWND) -> Result<()> {
         ..Default::default()
     };
 
-    copy_wide_to_fixed("TV Guard", &mut data.szTip);
+    copy_wide_to_fixed(APP_NAME, &mut data.szTip);
 
     if Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
         Ok(())
@@ -1556,12 +2257,43 @@ unsafe fn show_tray_menu(hwnd: HWND) {
         MF_STRING | MF_UNCHECKED
     };
 
-    let _ = AppendMenuW(menu, MF_STRING | MF_DISABLED, MENU_STATUS, PCWSTR(wide(&status_label).as_ptr()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING | MF_DISABLED,
+        MENU_STATUS,
+        PCWSTR(wide(&status_label).as_ptr()),
+    );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, MENU_CHECK_NOW, PCWSTR(wide("Check now").as_ptr()));
-    let _ = AppendMenuW(menu, MF_STRING, MENU_TOGGLE_TV_POWER, PCWSTR(wide(tv_power_label).as_ptr()));
-    let _ = AppendMenuW(menu, auto_switch_flag, MENU_AUTO_SWITCH_DISPLAYS, PCWSTR(wide("Auto switch displays").as_ptr()));
-    let _ = AppendMenuW(menu, MF_STRING, MENU_APPLY_PC, PCWSTR(wide("Apply PC mode").as_ptr()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_CHECK_NOW,
+        PCWSTR(wide("Check now").as_ptr()),
+    );
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_RUN_ONBOARDING,
+        PCWSTR(wide("Run onboarding").as_ptr()),
+    );
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_TOGGLE_TV_POWER,
+        PCWSTR(wide(tv_power_label).as_ptr()),
+    );
+    let _ = AppendMenuW(
+        menu,
+        auto_switch_flag,
+        MENU_AUTO_SWITCH_DISPLAYS,
+        PCWSTR(wide("Auto switch displays").as_ptr()),
+    );
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        MENU_APPLY_PC,
+        PCWSTR(wide("Apply PC mode").as_ptr()),
+    );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, PCWSTR(wide("Exit").as_ptr()));
 
