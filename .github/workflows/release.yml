@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build app
+        run: cargo build --release --bin tv_guard_tray
+
+      - name: Build installer
+        run: cargo build --release --bin TVGuardTraySetup
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/tv_guard_tray.exe dist/TVGuardTray.exe
+          Copy-Item target/release/TVGuardTraySetup.exe dist/TVGuardTraySetup.exe
+          Compress-Archive -Path dist/TVGuardTray.exe, dist/TVGuardTraySetup.exe -DestinationPath dist/TVGuardTray-windows-x64.zip -Force
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVGuardTray-windows-x64
+          path: |
+            dist/TVGuardTray.exe
+            dist/TVGuardTraySetup.exe
+            dist/TVGuardTray-windows-x64.zip
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/TVGuardTray.exe
+            dist/TVGuardTraySetup.exe
+            dist/TVGuardTray-windows-x64.zip
