@@ -23,8 +23,12 @@ RequestExecutionLevel user
 !define ENSURE_DISPLAY_CONFIG "installer\EnsureDisplayConfig.ps1"
 !endif
 
+!ifndef INSTALLER_OUTPUT
+!define INSTALLER_OUTPUT "dist\${APP_NAME}-Setup.exe"
+!endif
+
 Name "${APP_NAME}"
-OutFile "dist\${APP_NAME}-Setup.exe"
+OutFile "${INSTALLER_OUTPUT}"
 InstallDir "$LOCALAPPDATA\${APP_NAME}"
 InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
 
