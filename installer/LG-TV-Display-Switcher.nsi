@@ -37,7 +37,7 @@ Section "Install"
     Pop $0
 
     DetailPrint "Installing ${APP_NAME}..."
-    File /oname="$INSTDIR\${APP_EXE}" "target\release\${APP_EXE}"
+    File /oname=$INSTDIR\${APP_EXE} "target\release\${APP_EXE}"
 
     IfFileExists "$INSTDIR\${CONFIG_FILE}" config_done 0
     IfFileExists "$INSTDIR\${LEGACY_CONFIG_FILE}" 0 write_default_config
@@ -45,7 +45,7 @@ Section "Install"
         Goto config_done
 
 write_default_config:
-    File /oname="$INSTDIR\${CONFIG_FILE}" "installer\DefaultConfig.cfg"
+    File /oname=$INSTDIR\${CONFIG_FILE} "installer\DefaultConfig.cfg"
 
 config_done:
     Call EnsureDisplayConfig
@@ -71,7 +71,7 @@ SectionEnd
 Function EnsureDisplayConfig
     DetailPrint "Checking DisplayConfig dependency..."
     InitPluginsDir
-    File /oname="$PLUGINSDIR\EnsureDisplayConfig.ps1" "installer\EnsureDisplayConfig.ps1"
+    File /oname=$PLUGINSDIR\EnsureDisplayConfig.ps1 "installer\EnsureDisplayConfig.ps1"
     nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\EnsureDisplayConfig.ps1"'
     Pop $0
     ${If} $0 != 0
