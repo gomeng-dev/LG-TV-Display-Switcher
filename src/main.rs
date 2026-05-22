@@ -503,7 +503,9 @@ fn run_onboarding() -> std::result::Result<String, String> {
         }
         Ok(_) => notes.push("Audio endpoint scan found no active output devices".to_string()),
         Err(error) => {
-            notes.push(format!("Audio endpoint scan failed: {error}"));
+            notes.push(
+                "Audio endpoint scan failed; TV/audio pairing is saved, but audio device name may need manual configuration".to_string(),
+            );
             log_message(&format!("Audio endpoint scan failed: {error}"));
         }
     }

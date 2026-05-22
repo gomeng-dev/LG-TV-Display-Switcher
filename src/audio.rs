@@ -52,29 +52,41 @@ public class MMDeviceEnumerator {}
 
 [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDeviceEnumerator {
+    [PreserveSig]
     int EnumAudioEndpoints(EDataFlow dataFlow, DeviceState dwStateMask, out IMMDeviceCollection ppDevices);
 }
 
 [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-C0E9422C1607"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDeviceCollection {
+    [PreserveSig]
     int GetCount(out uint pcDevices);
+    [PreserveSig]
     int Item(uint nDevice, out IMMDevice ppDevice);
 }
 
 [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDevice {
+    [PreserveSig]
     int Activate(ref Guid iid, uint dwClsCtx, IntPtr pActivationParams, out IntPtr ppInterface);
+    [PreserveSig]
     int OpenPropertyStore(uint stgmAccess, out IPropertyStore ppProperties);
+    [PreserveSig]
     int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+    [PreserveSig]
     int GetState(out uint pdwState);
 }
 
 [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IPropertyStore {
+    [PreserveSig]
     int GetCount(out uint cProps);
+    [PreserveSig]
     int GetAt(uint iProp, out PROPERTYKEY pkey);
+    [PreserveSig]
     int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+    [PreserveSig]
     int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
+    [PreserveSig]
     int Commit();
 }
 
@@ -140,7 +152,60 @@ public class AudioEndpointLister {
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .map(str::to_string)
-            .collect();
+            .collect::<Vec<_>>();
+
+        if names.is_empty() {
+            list_sound_device_names_from_wmi()
+        } else {
+            Ok(names)
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let error = if stderr.is_empty() {
+            format!("PowerShell exited with {}", output.status)
+        } else {
+            stderr
+        };
+
+        match list_sound_device_names_from_wmi() {
+            Ok(names) if !names.is_empty() => Ok(names),
+            _ => Err(error),
+        }
+    }
+}
+
+fn list_sound_device_names_from_wmi() -> std::result::Result<Vec<String>, String> {
+    let script = r#"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Get-CimInstance Win32_SoundDevice |
+    Where-Object { $_.Name } |
+    Select-Object -ExpandProperty Name
+"#;
+
+    let output = Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("failed to start PowerShell: {error}"))?;
+
+    if output.status.success() {
+        let mut names = Vec::new();
+        for name in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if !names
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(name))
+            {
+                names.push(name.to_string());
+            }
+        }
         Ok(names)
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -171,29 +236,41 @@ public class MMDeviceEnumerator {}
 
 [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDeviceEnumerator {
+    [PreserveSig]
     int EnumAudioEndpoints(EDataFlow dataFlow, DeviceState dwStateMask, out IMMDeviceCollection ppDevices);
 }
 
 [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-C0E9422C1607"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDeviceCollection {
+    [PreserveSig]
     int GetCount(out uint pcDevices);
+    [PreserveSig]
     int Item(uint nDevice, out IMMDevice ppDevice);
 }
 
 [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IMMDevice {
+    [PreserveSig]
     int Activate(ref Guid iid, uint dwClsCtx, IntPtr pActivationParams, out IntPtr ppInterface);
+    [PreserveSig]
     int OpenPropertyStore(uint stgmAccess, out IPropertyStore ppProperties);
+    [PreserveSig]
     int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+    [PreserveSig]
     int GetState(out uint pdwState);
 }
 
 [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IPropertyStore {
+    [PreserveSig]
     int GetCount(out uint cProps);
+    [PreserveSig]
     int GetAt(uint iProp, out PROPERTYKEY pkey);
+    [PreserveSig]
     int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+    [PreserveSig]
     int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
+    [PreserveSig]
     int Commit();
 }
 
@@ -208,16 +285,27 @@ public class PolicyConfigClient {}
 
 [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface IPolicyConfig {
+    [PreserveSig]
     int GetMixFormat();
+    [PreserveSig]
     int GetDeviceFormat();
+    [PreserveSig]
     int SetDeviceFormat();
+    [PreserveSig]
     int GetProcessingPeriod();
+    [PreserveSig]
     int SetProcessingPeriod();
+    [PreserveSig]
     int GetShareMode();
+    [PreserveSig]
     int SetShareMode();
+    [PreserveSig]
     int GetPropertyValue();
+    [PreserveSig]
     int SetPropertyValue();
+    [PreserveSig]
     int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string wszDeviceId, ERole role);
+    [PreserveSig]
     int SetEndpointVisibility();
 }
 
