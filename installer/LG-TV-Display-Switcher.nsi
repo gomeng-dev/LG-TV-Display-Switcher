@@ -56,7 +56,7 @@ config_done:
 
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
-    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "0.1.0"
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "0.1.1"
     WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
     WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "gomeng-dev"
     WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
