@@ -19,7 +19,9 @@ use std::io::Write;
 use std::mem::size_of;
 use std::net::IpAddr;
 use std::net::UdpSocket;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use webos::{pair_webos_tv, read_webos_power, turn_off_webos_tv};
@@ -43,6 +45,7 @@ const CHECK_INTERVAL_MS: u32 = 5_000;
 const APP_NAME: &str = "LG-TV-Display-Switcher";
 const LOG_FILE_NAME: &str = "LG-TV-Display-Switcher.log";
 const APP_ICON_RESOURCE_ID: usize = 1;
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const TRAY_UID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_CHECK_NOW: u32 = WM_APP + 2;
@@ -56,7 +59,8 @@ const MENU_TOGGLE_TV_POWER: usize = 1005;
 const MENU_AUTO_SWITCH_DISPLAYS: usize = 1006;
 const MENU_RUN_ONBOARDING: usize = 1007;
 const MENU_APPLY_TV: usize = 1008;
-const MENU_EXIT: usize = 1009;
+const MENU_RUN_AS_STARTUP: usize = 1009;
+const MENU_EXIT: usize = 1010;
 static APP: OnceLock<Mutex<AppState>> = OnceLock::new();
 
 #[derive(Debug)]
@@ -172,6 +176,7 @@ unsafe extern "system" fn wnd_proc(
                 MENU_TOGGLE_TV_POWER => toggle_tv_power_from_state(),
                 MENU_AUTO_SWITCH_DISPLAYS => toggle_auto_switch_displays(),
                 MENU_RUN_ONBOARDING => run_onboarding_from_state(),
+                MENU_RUN_AS_STARTUP => toggle_run_as_startup(),
                 MENU_EXIT => {
                     remove_tray_icon(hwnd);
                     PostQuitMessage(0);
@@ -308,6 +313,20 @@ fn toggle_auto_switch_displays() {
         }
     } else {
         set_status("Auto switch displays disabled");
+    }
+}
+
+fn toggle_run_as_startup() {
+    if startup_enabled() {
+        match disable_startup() {
+            Ok(()) => set_status("Run as startup disabled"),
+            Err(error) => set_status(format!("Failed to disable run as startup: {error}")),
+        }
+    } else {
+        match enable_startup() {
+            Ok(()) => set_status("Run as startup enabled"),
+            Err(error) => set_status(format!("Failed to enable run as startup: {error}")),
+        }
     }
 }
 
@@ -867,6 +886,101 @@ fn read_tv_power() -> Result<TvPower> {
     }
 }
 
+fn startup_enabled() -> bool {
+    startup_run_registry_enabled() || startup_shortcut_path().is_some_and(|path| path.exists())
+}
+
+fn startup_run_registry_enabled() -> bool {
+    Command::new("reg.exe")
+        .arg("query")
+        .arg("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .arg("/v")
+        .arg(APP_NAME)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn enable_startup() -> std::result::Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("failed to locate current executable: {error}"))?;
+    let command = format!("\"{}\"", exe.display());
+    let output = Command::new("reg.exe")
+        .arg("add")
+        .arg("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .arg("/v")
+        .arg(APP_NAME)
+        .arg("/t")
+        .arg("REG_SZ")
+        .arg("/d")
+        .arg(command)
+        .arg("/f")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("failed to start reg.exe: {error}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_error("reg add", &output))
+    }
+}
+
+fn disable_startup() -> std::result::Result<(), String> {
+    let output = Command::new("reg.exe")
+        .arg("delete")
+        .arg("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run")
+        .arg("/v")
+        .arg(APP_NAME)
+        .arg("/f")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("failed to start reg.exe: {error}"))?;
+
+    if !output.status.success() && startup_run_registry_enabled() {
+        return Err(command_error("reg delete", &output));
+    }
+
+    if let Some(path) = startup_shortcut_path() {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| {
+                format!(
+                    "failed to remove startup shortcut {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn startup_shortcut_path() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA")?;
+    Some(
+        PathBuf::from(appdata)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs")
+            .join("Startup")
+            .join(format!("{APP_NAME}.lnk")),
+    )
+}
+
+fn command_error(action: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stderr.is_empty() {
+        format!("{action} failed: {stderr}")
+    } else if !stdout.is_empty() {
+        format!("{action} failed: {stdout}")
+    } else {
+        format!("{action} exited with {}", output.status)
+    }
+}
+
 unsafe fn add_tray_icon(hwnd: HWND) -> Result<()> {
     let icon = load_app_icon()?;
     let mut data = NOTIFYICONDATAW {
@@ -926,6 +1040,11 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     } else {
         MF_STRING | MF_UNCHECKED
     };
+    let startup_flag = if startup_enabled() {
+        MF_STRING | MF_CHECKED
+    } else {
+        MF_STRING | MF_UNCHECKED
+    };
 
     let _ = AppendMenuW(
         menu,
@@ -963,6 +1082,12 @@ unsafe fn show_tray_menu(hwnd: HWND) {
         MF_STRING,
         mode_action.0,
         PCWSTR(wide(mode_action.1).as_ptr()),
+    );
+    let _ = AppendMenuW(
+        menu,
+        startup_flag,
+        MENU_RUN_AS_STARTUP,
+        PCWSTR(wide("Run as startup").as_ptr()),
     );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, PCWSTR(wide("Exit").as_ptr()));

@@ -8,6 +8,12 @@ uses `Unreleased`.
 
 ## [Unreleased]
 
+## [v0.1.4]
+
+### Added
+
+- Add a tray menu toggle to run the app at user startup.
+
 ## [v0.1.3]
 
 ### Added
