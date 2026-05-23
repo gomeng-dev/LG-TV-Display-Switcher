@@ -8,6 +8,8 @@ uses `Unreleased`.
 
 ## [Unreleased]
 
+## [v0.1.3]
+
 ### Added
 
 - Add a Windows application, tray, installer, and uninstaller icon generated from `assets/app-icon.svg`.
