@@ -9,7 +9,10 @@ use audio::{
     choose_tv_audio_endpoint_device, get_default_audio_output_device, list_audio_output_devices,
     set_default_audio_output,
 };
-use config::{load_or_create_config, save_config_value, save_webos_client_key, AppConfig};
+use config::{
+    format_mac_address, load_or_create_config, parse_mac_address, save_config_value,
+    save_webos_client_key, AppConfig,
+};
 use display::{
     apply_pc_mode_change_display_settings, apply_pc_mode_native, embedded_pc_mode_script,
     embedded_tv_mode_script, is_display_active, read_ddc_power, run_embedded_display_config_script,
@@ -17,8 +20,7 @@ use display::{
 };
 use std::io::Write;
 use std::mem::size_of;
-use std::net::IpAddr;
-use std::net::UdpSocket;
+use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -443,8 +445,8 @@ fn wake_tv_from_state() {
         return;
     };
 
-    let Some(mac) = config.tv_mac else {
-        set_status("Wake TV failed: TvMac is not configured");
+    let Some(mac) = tv_mac_or_discover_from_network(&config) else {
+        set_status("Wake TV failed: TV MAC is not configured");
         return;
     };
 
@@ -455,6 +457,50 @@ fn wake_tv_from_state() {
         )),
         Err(error) => set_status(format!("Wake TV failed: {error}")),
     }
+}
+
+fn tv_mac_or_discover_from_network(config: &AppConfig) -> Option<[u8; 6]> {
+    if let Some(mac) = config.tv_mac {
+        return Some(mac);
+    }
+
+    let host = config.webos_host.as_deref()?;
+    let mac = discover_mac_from_arp(host)?;
+    let mac_text = format_mac_address(mac);
+    save_config_value("TvMac", &mac_text);
+
+    if let Some(state) = APP.get() {
+        if let Ok(mut state) = state.lock() {
+            state.config.tv_mac = Some(mac);
+        }
+    }
+
+    set_status(format!("TV MAC discovered from network: {mac_text}"));
+    Some(mac)
+}
+
+fn discover_mac_from_arp(host: &str) -> Option<[u8; 6]> {
+    let ip = resolve_host_ip(host)?;
+    let output = Command::new("arp")
+        .args(["-a", &ip.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace().find_map(parse_mac_address)
+}
+
+fn resolve_host_ip(host: &str) -> Option<IpAddr> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(ip);
+    }
+
+    (host, 0)
+        .to_socket_addrs()
+        .ok()?
+        .map(|addr| addr.ip())
+        .find(|ip| ip.is_ipv4())
 }
 
 fn toggle_tv_power_from_state() {

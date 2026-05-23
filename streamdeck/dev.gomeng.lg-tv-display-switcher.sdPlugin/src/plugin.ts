@@ -202,6 +202,32 @@ function displayModeTitle(result: CompanionResult): string {
   return result.displayMode === "tv" ? "TV\nMode" : "PC\nMode";
 }
 
+function tvPowerTitle(result: CompanionResult): string {
+  if (/wake tv packet sent/i.test(result.status)) {
+    return "TV\nWaking";
+  }
+
+  return result.tvOn === true
+    ? "TV\nOn"
+    : result.tvOn === false
+      ? "TV\nOff"
+      : "TV\nPower";
+}
+
+function failureTitle(result: CompanionResult): string {
+  const message = `${result.error ?? ""} ${result.status ?? ""}`;
+  if (/\b(tv)?mac\b|tvmac/i.test(message)) {
+    return "No\nMAC";
+  }
+  if (/tv is not on|tv off|not on/i.test(message)) {
+    return "TV\nOff";
+  }
+  if (/not configured|config/i.test(message)) {
+    return "Config";
+  }
+  return "Failed";
+}
+
 function actionKey(ev: KeyDownEvent | WillAppearEvent): string {
   return String(ev.action.id);
 }
@@ -210,6 +236,14 @@ async function updateDisplayModeAction(
   ev: KeyDownEvent | WillAppearEvent,
   result: CompanionResult,
 ): Promise<void> {
+  if (result.tvOn === false) {
+    if ("setState" in ev.action) {
+      await (ev.action as KeyAction).setState(0);
+    }
+    await ev.action.setTitle("TV\nOff");
+    return;
+  }
+
   let displayMode = result.displayMode;
   if (displayMode === "unknown") {
     displayMode = rememberedDisplayModes.get(actionKey(ev)) ?? "pc";
@@ -229,14 +263,27 @@ async function toggleDisplayMode(ev: KeyDownEvent): Promise<CompanionResult> {
     return current;
   }
 
+  if (current.tvOn !== true) {
+    return {
+      ...current,
+      ok: false,
+      error: "TV is off",
+    };
+  }
+
   const remembered = rememberedDisplayModes.get(actionKey(ev));
-  const mode = current.displayMode === "unknown" ? remembered ?? "pc" : current.displayMode;
-  const command: CompanionCommand = mode === "tv" ? "apply-pc-mode" : "apply-tv-mode";
+  const mode =
+    current.displayMode === "unknown" ? remembered ?? "pc" : current.displayMode;
+  const command: CompanionCommand =
+    mode === "tv" ? "apply-pc-mode" : "apply-tv-mode";
   const result = await runCompanion(command);
 
   if (result.ok) {
     const nextMode = command === "apply-pc-mode" ? "pc" : "tv";
-    rememberedDisplayModes.set(actionKey(ev), result.displayMode === "unknown" ? nextMode : result.displayMode);
+    rememberedDisplayModes.set(
+      actionKey(ev),
+      result.displayMode === "unknown" ? nextMode : result.displayMode,
+    );
     return {
       ...result,
       displayMode: result.displayMode === "unknown" ? nextMode : result.displayMode,
@@ -310,7 +357,7 @@ class CompanionAction extends SingletonAction {
       }
 
       if (!result.ok) {
-        await ev.action.setTitle(result.error || "Failed");
+        await ev.action.setTitle(failureTitle(result));
         await ev.action.showAlert();
         return;
       }
@@ -342,8 +389,7 @@ registerAction({
   uuid: `${PLUGIN_UUID}.tv-power-toggle`,
   command: "toggle-tv-power",
   defaultTitle: "TV\nPower",
-  successTitle: (result) =>
-    result.tvOn === true ? "TV\nOn" : result.tvOn === false ? "TV\nOff" : "TV\nPower",
+  successTitle: tvPowerTitle,
 });
 
 registerAction({

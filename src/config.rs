@@ -212,7 +212,7 @@ fn default_config_template() -> String {
     .join("\r\n")
 }
 
-fn parse_mac_address(value: &str) -> Option<[u8; 6]> {
+pub(crate) fn parse_mac_address(value: &str) -> Option<[u8; 6]> {
     let cleaned: String = value.chars().filter(|ch| ch.is_ascii_hexdigit()).collect();
     if cleaned.len() != 12 {
         return None;
@@ -224,4 +224,11 @@ fn parse_mac_address(value: &str) -> Option<[u8; 6]> {
         mac[idx] = u8::from_str_radix(part, 16).ok()?;
     }
     Some(mac)
+}
+
+pub(crate) fn format_mac_address(mac: [u8; 6]) -> String {
+    mac.iter()
+        .map(|part| format!("{part:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }

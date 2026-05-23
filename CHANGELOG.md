@@ -8,6 +8,14 @@ uses `Unreleased`.
 
 ## [Unreleased]
 
+## [v0.1.6]
+
+### Fixed
+
+- Show concise Stream Deck failure titles for missing TV MAC and other companion errors.
+- Keep the display mode Stream Deck switch visually disabled while the TV is off.
+- Discover and persist the TV MAC from the ARP cache when possible before sending Wake-on-LAN.
+
 ## [v0.1.5]
 
 ### Added
