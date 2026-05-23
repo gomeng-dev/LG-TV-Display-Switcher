@@ -1,6 +1,6 @@
 [package]
 name = "lg-tv-display-switcher"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 
 [[bin]]
@@ -14,12 +14,12 @@ windows = { version = "0.58", features = [
     "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Security",
 ] }
 
 [build-dependencies]

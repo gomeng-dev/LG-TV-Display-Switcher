@@ -1,6 +1,7 @@
 # Rust build output
 /target/
 /dist/
+*.streamDeckPlugin
 
 # Stream Deck plugin local dependencies
 /streamdeck/**/node_modules/
@@ -15,6 +16,7 @@
 # Local runtime configuration and logs
 /LG-TV-Display-Switcher.cfg
 /LG-TV-Display-Switcher.log
+/logs/
 /TVGuardTray.cfg
 /TVGuardTray.log
 

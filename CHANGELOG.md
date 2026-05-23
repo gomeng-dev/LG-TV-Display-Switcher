@@ -8,15 +8,28 @@ uses `Unreleased`.
 
 ## [Unreleased]
 
+## [v0.1.5]
+
 ### Added
 
-- Add a companion Stream Deck plugin with TV power, TV mode, PC mode, and auto-switch actions.
+- Add a companion Stream Deck plugin with TV power, display mode switch, and auto-switch actions.
 - Add a Stream Deck JSON CLI interface to the Windows app for companion plugin control.
+- Add Korean and English installation guides.
+- Add Marketplace thumbnail/gallery images and PNG app icon assets.
 
 ### Changed
 
 - Include the packaged `.streamDeckPlugin` in GitHub release artifacts.
 - Package the Stream Deck plugin with SDK v3 compatibility for Marketplace DRM processing.
+- Replace separate TV mode and PC mode Stream Deck actions with a single display mode switch action.
+- Use Lucide open-source icons for Stream Deck action/category icons and document third-party notices.
+
+### Fixed
+
+- Prevent duplicate tray app instances when the Stream Deck plugin launches the companion app repeatedly.
+- Detect missing or outdated companion CLI support and show an update prompt instead of spawning extra app instances.
+- Build the Stream Deck plugin as CommonJS so bundled Node dependencies load correctly.
+- Add required Stream Deck category/action icons for local plugin installation.
 
 ## [v0.1.4]
 

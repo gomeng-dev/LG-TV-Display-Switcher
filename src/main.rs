@@ -28,10 +28,12 @@ use webos::{pair_webos_tv, read_webos_power, turn_off_webos_tv};
 
 use serde_json::json;
 use windows::core::{Error, Result, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Storage::FileSystem::WriteFile;
-use windows::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
+    POINT, WPARAM,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
@@ -74,6 +76,18 @@ struct AppState {
     onboarding_started: bool,
 }
 
+struct SingleInstanceGuard(Option<HANDLE>);
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0 {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum TvPower {
     OutputInactive,
@@ -107,6 +121,10 @@ fn main() -> Result<()> {
         };
         std::process::exit(exit_code);
     }
+
+    let Some(_single_instance) = acquire_single_instance() else {
+        return Ok(());
+    };
 
     unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -155,6 +173,27 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn acquire_single_instance() -> Option<SingleInstanceGuard> {
+    let mutex_name = wide("Local\\LG-TV-Display-Switcher");
+    unsafe {
+        match CreateMutexW(None, true, PCWSTR(mutex_name.as_ptr())) {
+            Ok(handle) => {
+                if GetLastError() == ERROR_ALREADY_EXISTS {
+                    let _ = CloseHandle(handle);
+                    set_status("Another LG-TV-Display-Switcher instance is already running");
+                    None
+                } else {
+                    Some(SingleInstanceGuard(Some(handle)))
+                }
+            }
+            Err(error) => {
+                set_status(format!("Single instance check failed: {error}"));
+                Some(SingleInstanceGuard(None))
+            }
+        }
+    }
+}
+
 fn streamdeck_cli_command() -> Option<std::result::Result<String, String>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let index = args.iter().position(|arg| arg == "--streamdeck")?;
@@ -182,6 +221,7 @@ fn run_streamdeck_cli(command: &str) -> i32 {
             apply_pc_mode_from_state();
             status_result()
         }
+        "toggle-display-mode" => streamdeck_toggle_display_mode(),
         "toggle-tv-power" => {
             toggle_tv_power_from_state();
             status_result()
@@ -219,6 +259,23 @@ fn streamdeck_apply_tv_mode() -> std::result::Result<(), String> {
     status_result()
 }
 
+fn streamdeck_toggle_display_mode() -> std::result::Result<(), String> {
+    refresh_tv_power_status(false);
+
+    if current_display_mode() == "tv" {
+        apply_pc_mode_from_state();
+        return status_result();
+    }
+
+    if current_tv_on() != Some(true) {
+        set_status("TV mode skipped: TV is not on");
+        return Err("TV is not on".to_string());
+    }
+
+    apply_tv_mode_if_tv_is_on(false);
+    status_result()
+}
+
 fn status_result() -> std::result::Result<(), String> {
     let status = current_status();
     if status.to_ascii_lowercase().contains("failed") {
@@ -233,6 +290,7 @@ fn print_streamdeck_json(ok: bool, error: &str) {
         "ok": ok,
         "status": current_status(),
         "tvOn": current_tv_on(),
+        "displayMode": current_display_mode(),
         "autoSwitchDisplays": auto_switch_displays(),
         "installRequired": false,
         "error": if error.is_empty() { serde_json::Value::Null } else { json!(error) },
@@ -245,12 +303,9 @@ fn write_stdout_line(line: &str) {
     output.push_str(line);
     output.push_str("\r\n");
 
-    unsafe {
-        if let Ok(stdout) = GetStdHandle(STD_OUTPUT_HANDLE) {
-            let mut written = 0;
-            let _ = WriteFile(stdout, Some(output.as_bytes()), Some(&mut written), None);
-        }
-    }
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(output.as_bytes());
+    let _ = stdout.flush();
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -368,6 +423,14 @@ fn auto_switch_displays() -> bool {
                 .map(|state| state.config.auto_switch_displays)
         })
         .unwrap_or(false)
+}
+
+fn current_display_mode() -> &'static str {
+    if is_display_active(TV_DEVICE_NAME) {
+        "tv"
+    } else {
+        "pc"
+    }
 }
 
 fn wake_tv_from_state() {

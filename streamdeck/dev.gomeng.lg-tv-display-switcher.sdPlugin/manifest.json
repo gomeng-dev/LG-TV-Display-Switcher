@@ -2,7 +2,7 @@
   "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
   "Actions": [
     {
-      "Icon": "imgs/actions/power",
+      "Icon": "imgs/actions/power-icon",
       "Name": "TV Power Toggle",
       "States": [
         {
@@ -14,31 +14,23 @@
       "UUID": "dev.gomeng.lg-tv-display-switcher.tv-power-toggle"
     },
     {
-      "Icon": "imgs/actions/tv-mode",
-      "Name": "Apply TV Mode",
+      "Icon": "imgs/actions/display-mode-icon",
+      "Name": "Display Mode Switch",
       "States": [
+        {
+          "Image": "imgs/actions/pc-mode",
+          "Title": "PC Mode"
+        },
         {
           "Image": "imgs/actions/tv-mode",
           "Title": "TV Mode"
         }
       ],
-      "Tooltip": "Switch displays and audio to TV mode.",
-      "UUID": "dev.gomeng.lg-tv-display-switcher.apply-tv-mode"
+      "Tooltip": "Toggle between PC mode and TV mode.",
+      "UUID": "dev.gomeng.lg-tv-display-switcher.display-mode-toggle"
     },
     {
-      "Icon": "imgs/actions/pc-mode",
-      "Name": "Apply PC Mode",
-      "States": [
-        {
-          "Image": "imgs/actions/pc-mode",
-          "Title": "PC Mode"
-        }
-      ],
-      "Tooltip": "Switch displays and audio back to PC mode.",
-      "UUID": "dev.gomeng.lg-tv-display-switcher.apply-pc-mode"
-    },
-    {
-      "Icon": "imgs/actions/auto-switch",
+      "Icon": "imgs/actions/auto-switch-icon",
       "Name": "Toggle Auto Switch",
       "States": [
         {
@@ -52,6 +44,7 @@
   ],
   "Author": "gomeng-dev",
   "Category": "LG TV Display Switcher",
+  "CategoryIcon": "imgs/category-icon",
   "CodePath": "bin/plugin.js",
   "Description": "Control LG TV display, power, and audio switching through the LG-TV-Display-Switcher companion app.",
   "Icon": "imgs/plugin-icon",
@@ -72,5 +65,5 @@
   "SupportURL": "https://github.com/gomeng-dev/LG-TV-Display-Switcher/issues",
   "URL": "https://github.com/gomeng-dev/LG-TV-Display-Switcher",
   "UUID": "dev.gomeng.lg-tv-display-switcher",
-  "Version": "0.1.4.0"
+  "Version": "0.1.5.0"
 }

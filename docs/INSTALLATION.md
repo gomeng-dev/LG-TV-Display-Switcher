@@ -54,8 +54,7 @@ PC 모드로 돌아갈 때 오디오는 TV 모드 진입 직전에 사용하던 
 사용 가능한 액션:
 
 - `TV Power Toggle`: TV 전원을 토글합니다.
-- `Apply TV Mode`: TV 모드로 전환합니다. TV가 켜져 있을 때만 동작합니다.
-- `Apply PC Mode`: PC 모드로 전환합니다.
+- `Display Mode Switch`: PC 모드와 TV 모드를 전환합니다. TV 모드는 TV가 켜져 있을 때만 동작합니다.
 - `Toggle Auto Switch`: 자동 전환 기능을 켜거나 끕니다.
 
 Stream Deck 플러그인은 Windows 앱을 직접 포함하지 않습니다. 설치된 `LG-TV-Display-Switcher.exe`를 companion 앱으로 호출합니다. Windows 앱이 설치되어 있지 않으면 버튼에 `Install app` 또는 `App missing`이 표시되고 최신 릴리스 페이지가 열립니다.

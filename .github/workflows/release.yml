@@ -69,7 +69,7 @@ jobs:
           pnpm run build
           Pop-Location
           $refName = "${{ github.ref_name }}"
-          $pluginVersion = if ($refName -match '^v?(\d+\.\d+\.\d+)$') { "$($Matches[1]).0" } else { "0.1.4.0" }
+          $pluginVersion = if ($refName -match '^v?(\d+\.\d+\.\d+)$') { "$($Matches[1]).0" } else { "0.1.5.0" }
           pnpm --package=@elgato/cli dlx streamdeck pack streamdeck/dev.gomeng.lg-tv-display-switcher.sdPlugin --output dist --force --no-update-check --version $pluginVersion
 
       - name: Stage artifacts

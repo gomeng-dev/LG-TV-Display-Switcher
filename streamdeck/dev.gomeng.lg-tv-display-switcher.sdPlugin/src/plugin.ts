@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import streamDeck, {
   action,
+  type KeyAction,
   SingletonAction,
   type KeyDownEvent,
   type WillAppearEvent,
@@ -14,22 +15,28 @@ const execFileAsync = promisify(execFile);
 const PLUGIN_UUID = "dev.gomeng.lg-tv-display-switcher";
 const APP_NAME = "LG-TV-Display-Switcher";
 const APP_EXE = "LG-TV-Display-Switcher.exe";
+const COMPANION_TIMEOUT_MS = 8_000;
 const RELEASE_URL =
   "https://github.com/gomeng-dev/LG-TV-Display-Switcher/releases/latest";
 
 type CompanionCommand =
   | "apply-tv-mode"
   | "apply-pc-mode"
+  | "toggle-display-mode"
   | "toggle-tv-power"
   | "toggle-auto-switch"
   | "status";
+
+type DisplayMode = "pc" | "tv" | "unknown";
 
 type CompanionResult = {
   ok: boolean;
   status: string;
   tvOn: boolean | null;
+  displayMode: DisplayMode;
   autoSwitchDisplays: boolean;
   installRequired: boolean;
+  updateRequired: boolean;
   error: string | null;
 };
 
@@ -39,6 +46,10 @@ type ActionConfig = {
   defaultTitle: string;
   successTitle: (result: CompanionResult) => string;
 };
+
+const rememberedDisplayModes = new Map<string, DisplayMode>();
+let companionCliUnavailable = false;
+let commandInFlight = false;
 
 async function fileExists(path: string): Promise<boolean> {
   try {
@@ -90,14 +101,20 @@ async function readInstallLocation(): Promise<string | null> {
 }
 
 async function runCompanion(command: CompanionCommand): Promise<CompanionResult> {
+  if (companionCliUnavailable) {
+    return updateRequiredResult();
+  }
+
   const appPath = await findCompanionApp();
   if (!appPath) {
     return {
       ok: false,
       status: "App missing",
       tvOn: null,
+      displayMode: "unknown",
       autoSwitchDisplays: false,
       installRequired: true,
+      updateRequired: false,
       error: "LG-TV-Display-Switcher is not installed.",
     };
   }
@@ -107,7 +124,7 @@ async function runCompanion(command: CompanionCommand): Promise<CompanionResult>
       appPath,
       ["--streamdeck", command, "--json"],
       {
-        timeout: 30_000,
+        timeout: COMPANION_TIMEOUT_MS,
         windowsHide: true,
       },
     );
@@ -119,18 +136,34 @@ async function runCompanion(command: CompanionCommand): Promise<CompanionResult>
         : "";
 
     if (output.trim()) {
-      return parseCompanionOutput(output);
+      try {
+        return parseCompanionOutput(output);
+      } catch {
+        companionCliUnavailable = true;
+        return updateRequiredResult();
+      }
     }
 
-    return {
-      ok: false,
-      status: "Command failed",
-      tvOn: null,
-      autoSwitchDisplays: false,
-      installRequired: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
+    companionCliUnavailable = true;
+    return updateRequiredResult(
+      error instanceof Error ? error.message : String(error),
+    );
   }
+}
+
+function updateRequiredResult(error?: string): CompanionResult {
+  return {
+    ok: false,
+    status: "Update app required",
+    tvOn: null,
+    displayMode: "unknown",
+    autoSwitchDisplays: false,
+    installRequired: false,
+    updateRequired: true,
+    error:
+      error ||
+      "The installed companion app does not support the Stream Deck CLI. Please install the latest LG-TV-Display-Switcher.",
+  };
 }
 
 function parseCompanionOutput(output: string): CompanionResult {
@@ -154,14 +187,70 @@ function parseCompanionOutput(output: string): CompanionResult {
         : parsed.tvOn === null
           ? null
           : null,
+    displayMode:
+      parsed.displayMode === "pc" || parsed.displayMode === "tv"
+        ? parsed.displayMode
+        : "unknown",
     autoSwitchDisplays: Boolean(parsed.autoSwitchDisplays),
     installRequired: Boolean(parsed.installRequired),
+    updateRequired: Boolean(parsed.updateRequired),
     error: parsed.error ? String(parsed.error) : null,
   };
 }
 
-async function handleMissingApp(ev: KeyDownEvent): Promise<void> {
-  await ev.action.setTitle("Install app");
+function displayModeTitle(result: CompanionResult): string {
+  return result.displayMode === "tv" ? "TV\nMode" : "PC\nMode";
+}
+
+function actionKey(ev: KeyDownEvent | WillAppearEvent): string {
+  return String(ev.action.id);
+}
+
+async function updateDisplayModeAction(
+  ev: KeyDownEvent | WillAppearEvent,
+  result: CompanionResult,
+): Promise<void> {
+  let displayMode = result.displayMode;
+  if (displayMode === "unknown") {
+    displayMode = rememberedDisplayModes.get(actionKey(ev)) ?? "pc";
+  } else {
+    rememberedDisplayModes.set(actionKey(ev), displayMode);
+  }
+
+  if ("setState" in ev.action) {
+    await (ev.action as KeyAction).setState(displayMode === "tv" ? 1 : 0);
+  }
+  await ev.action.setTitle(displayMode === "tv" ? "TV\nMode" : "PC\nMode");
+}
+
+async function toggleDisplayMode(ev: KeyDownEvent): Promise<CompanionResult> {
+  const current = await runCompanion("status");
+  if (current.installRequired || current.updateRequired) {
+    return current;
+  }
+
+  const remembered = rememberedDisplayModes.get(actionKey(ev));
+  const mode = current.displayMode === "unknown" ? remembered ?? "pc" : current.displayMode;
+  const command: CompanionCommand = mode === "tv" ? "apply-pc-mode" : "apply-tv-mode";
+  const result = await runCompanion(command);
+
+  if (result.ok) {
+    const nextMode = command === "apply-pc-mode" ? "pc" : "tv";
+    rememberedDisplayModes.set(actionKey(ev), result.displayMode === "unknown" ? nextMode : result.displayMode);
+    return {
+      ...result,
+      displayMode: result.displayMode === "unknown" ? nextMode : result.displayMode,
+    };
+  }
+
+  return result;
+}
+
+async function handleUnavailableApp(
+  ev: KeyDownEvent,
+  result: CompanionResult,
+): Promise<void> {
+  await ev.action.setTitle(result.updateRequired ? "Update app" : "Install app");
   await ev.action.showAlert();
   await streamDeck.system.openUrl(RELEASE_URL);
 }
@@ -180,9 +269,23 @@ class CompanionAction extends SingletonAction {
 
     if (this.config.command === "toggle-auto-switch") {
       const result = await runCompanion("status");
+      if (result.updateRequired) {
+        await ev.action.setTitle("Update app");
+        return;
+      }
       await ev.action.setTitle(
         result.autoSwitchDisplays ? "Auto\nOn" : "Auto\nOff",
       );
+      return;
+    }
+
+    if (this.config.command === "toggle-display-mode") {
+      const result = await runCompanion("status");
+      if (result.updateRequired) {
+        await ev.action.setTitle("Update app");
+        return;
+      }
+      await updateDisplayModeAction(ev, result);
       return;
     }
 
@@ -190,20 +293,37 @@ class CompanionAction extends SingletonAction {
   }
 
   override async onKeyDown(ev: KeyDownEvent): Promise<void> {
-    const result = await runCompanion(this.config.command);
-    if (result.installRequired) {
-      await handleMissingApp(ev);
-      return;
-    }
-
-    if (!result.ok) {
-      await ev.action.setTitle(result.error || "Failed");
+    if (commandInFlight) {
       await ev.action.showAlert();
       return;
     }
 
-    await ev.action.setTitle(this.config.successTitle(result));
-    await ev.action.showOk();
+    commandInFlight = true;
+    try {
+      const result =
+        this.config.command === "toggle-display-mode"
+          ? await toggleDisplayMode(ev)
+          : await runCompanion(this.config.command);
+      if (result.installRequired || result.updateRequired) {
+        await handleUnavailableApp(ev, result);
+        return;
+      }
+
+      if (!result.ok) {
+        await ev.action.setTitle(result.error || "Failed");
+        await ev.action.showAlert();
+        return;
+      }
+
+      if (this.config.command === "toggle-display-mode") {
+        await updateDisplayModeAction(ev, result);
+      } else {
+        await ev.action.setTitle(this.config.successTitle(result));
+      }
+      await ev.action.showOk();
+    } finally {
+      commandInFlight = false;
+    }
   }
 }
 
@@ -227,17 +347,10 @@ registerAction({
 });
 
 registerAction({
-  uuid: `${PLUGIN_UUID}.apply-tv-mode`,
-  command: "apply-tv-mode",
-  defaultTitle: "TV\nMode",
-  successTitle: () => "TV\nMode",
-});
-
-registerAction({
-  uuid: `${PLUGIN_UUID}.apply-pc-mode`,
-  command: "apply-pc-mode",
+  uuid: `${PLUGIN_UUID}.display-mode-toggle`,
+  command: "toggle-display-mode",
   defaultTitle: "PC\nMode",
-  successTitle: () => "PC\nMode",
+  successTitle: displayModeTitle,
 });
 
 registerAction({
@@ -248,4 +361,4 @@ registerAction({
     result.autoSwitchDisplays ? "Auto\nOn" : "Auto\nOff",
 });
 
-await streamDeck.connect();
+void streamDeck.connect();

@@ -54,8 +54,7 @@ When returning to PC mode, audio is restored to the default output device that w
 Available actions:
 
 - `TV Power Toggle`: Toggles TV power.
-- `Apply TV Mode`: Switches to TV mode. This only works when the TV is on.
-- `Apply PC Mode`: Switches to PC mode.
+- `Display Mode Switch`: Toggles between PC mode and TV mode. TV mode only works when the TV is on.
 - `Toggle Auto Switch`: Turns automatic display switching on or off.
 
 The Stream Deck plugin does not include the Windows app. It calls the installed `LG-TV-Display-Switcher.exe` as a companion app. If the Windows app is not installed, the button shows `Install app` or `App missing` and opens the latest GitHub release page.
