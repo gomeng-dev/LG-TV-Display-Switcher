@@ -48,8 +48,9 @@ jobs:
           }
           $defaultConfig = (Resolve-Path installer/DefaultConfig.cfg).Path
           $ensureDisplayConfig = (Resolve-Path installer/EnsureDisplayConfig.ps1).Path
+          $iconFile = (Resolve-Path assets/app-icon.ico).Path
           $installerOutput = Join-Path (Resolve-Path dist).Path "LG-TV-Display-Switcher-Setup.exe"
-          & $makensis "/DAPP_BINARY=$appBinary" "/DDEFAULT_CONFIG=$defaultConfig" "/DENSURE_DISPLAY_CONFIG=$ensureDisplayConfig" "/DINSTALLER_OUTPUT=$installerOutput" installer/LG-TV-Display-Switcher.nsi
+          & $makensis "/DAPP_BINARY=$appBinary" "/DDEFAULT_CONFIG=$defaultConfig" "/DENSURE_DISPLAY_CONFIG=$ensureDisplayConfig" "/DICON_FILE=$iconFile" "/DINSTALLER_OUTPUT=$installerOutput" installer/LG-TV-Display-Switcher.nsi
 
       - name: Stage artifacts
         shell: pwsh
