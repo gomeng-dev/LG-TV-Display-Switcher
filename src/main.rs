@@ -5,7 +5,10 @@ mod config;
 mod display;
 mod webos;
 
-use audio::{choose_tv_audio_endpoint, list_audio_output_names, set_default_audio_output_by_name};
+use audio::{
+    choose_tv_audio_endpoint_device, get_default_audio_output_device, list_audio_output_devices,
+    set_default_audio_output,
+};
 use config::{load_or_create_config, save_config_value, save_webos_client_key, AppConfig};
 use display::{
     apply_pc_mode_change_display_settings, apply_pc_mode_native, embedded_pc_mode_script,
@@ -39,6 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const CHECK_INTERVAL_MS: u32 = 5_000;
 const APP_NAME: &str = "LG-TV-Display-Switcher";
 const LOG_FILE_NAME: &str = "LG-TV-Display-Switcher.log";
+const APP_ICON_RESOURCE_ID: usize = 1;
 const TRAY_UID: u32 = 1;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_CHECK_NOW: u32 = WM_APP + 2;
@@ -51,7 +55,8 @@ const MENU_TURN_OFF_TV: usize = 1004;
 const MENU_TOGGLE_TV_POWER: usize = 1005;
 const MENU_AUTO_SWITCH_DISPLAYS: usize = 1006;
 const MENU_RUN_ONBOARDING: usize = 1007;
-const MENU_EXIT: usize = 1008;
+const MENU_APPLY_TV: usize = 1008;
+const MENU_EXIT: usize = 1009;
 static APP: OnceLock<Mutex<AppState>> = OnceLock::new();
 
 #[derive(Debug)]
@@ -88,9 +93,11 @@ fn main() -> Result<()> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
         let class_name = wide("LgTvDisplaySwitcherWindow");
+        let app_icon = load_app_icon()?;
 
         let window_class = WNDCLASSW {
             hInstance: HINSTANCE(instance.0),
+            hIcon: app_icon,
             lpszClassName: PCWSTR(class_name.as_ptr()),
             lpfnWndProc: Some(wnd_proc),
             ..Default::default()
@@ -159,6 +166,7 @@ unsafe extern "system" fn wnd_proc(
             match wparam.0 & 0xffff {
                 MENU_CHECK_NOW => check_and_apply_pc_mode_if_needed(),
                 MENU_APPLY_PC => apply_pc_mode_from_state(),
+                MENU_APPLY_TV => apply_tv_mode_from_state(),
                 MENU_WAKE_TV => wake_tv_from_state(),
                 MENU_TURN_OFF_TV => turn_off_tv_from_state(),
                 MENU_TOGGLE_TV_POWER => toggle_tv_power_from_state(),
@@ -217,7 +225,7 @@ fn update_tv_state(tv_on: bool, status: String) {
 
     if auto_switch && previous.is_some() && previous != Some(tv_on) {
         if tv_on {
-            apply_tv_mode_from_state();
+            apply_tv_mode_if_tv_is_on(false);
         } else {
             apply_pc_mode_from_state();
         }
@@ -294,7 +302,7 @@ fn toggle_auto_switch_displays() {
     if enabled {
         set_status("Auto switch displays enabled");
         match current_tv_on {
-            Some(true) => apply_tv_mode_from_state(),
+            Some(true) => apply_tv_mode_if_tv_is_on(false),
             Some(false) => apply_pc_mode_from_state(),
             None => check_and_apply_pc_mode_if_needed(),
         }
@@ -331,8 +339,12 @@ fn turn_off_tv_from_state() {
                 }
             }
             set_status("Turn TV off command sent; webOS client key saved");
+            apply_pc_mode_from_state();
         }
-        Ok(None) => set_status("Turn TV off command sent"),
+        Ok(None) => {
+            set_status("Turn TV off command sent");
+            apply_pc_mode_from_state();
+        }
         Err(error) => set_status(format!("Turn TV off failed: {error}")),
     }
 }
@@ -426,7 +438,12 @@ fn run_onboarding() -> std::result::Result<String, String> {
         for port in &ports {
             set_status(format!("Checking webOS TV at {host}:{port}"));
             if matches!(
-                read_webos_power(host, *port, Duration::from_millis(2500)),
+                read_webos_power(
+                    host,
+                    *port,
+                    Duration::from_millis(2500),
+                    config.webos_client_key.as_deref(),
+                ),
                 TvPower::On
             ) {
                 found = Some((host.clone(), *port));
@@ -481,24 +498,41 @@ fn run_onboarding() -> std::result::Result<String, String> {
     }
 
     set_status("Scanning active audio output devices");
-    match list_audio_output_names() {
-        Ok(names) if !names.is_empty() => {
-            for name in &names {
-                log_message(&format!("Audio endpoint: {name}"));
+    match list_audio_output_devices() {
+        Ok(devices) if !devices.is_empty() => {
+            for device in &devices {
+                match device.id.as_deref() {
+                    Some(id) => log_message(&format!("Audio endpoint: {} [{id}]", device.name)),
+                    None => log_message(&format!("Audio endpoint: {}", device.name)),
+                }
             }
 
-            if let Some(selected) =
-                choose_tv_audio_endpoint(&names, config.tv_audio_device_name_contains.as_deref())
-            {
-                save_config_value("TvAudioDeviceNameContains", &selected);
+            if let Some(selected) = choose_tv_audio_endpoint_device(
+                &devices,
+                config.tv_audio_device_name_contains.as_deref(),
+            ) {
+                save_config_value("TvAudioDeviceNameContains", &selected.name);
+                save_config_value(
+                    "TvAudioEndpointId",
+                    selected.id.as_deref().unwrap_or_default(),
+                );
                 if let Some(state) = APP.get() {
                     if let Ok(mut state) = state.lock() {
-                        state.config.tv_audio_device_name_contains = Some(selected.clone());
+                        state.config.tv_audio_device_name_contains = Some(selected.name.clone());
+                        state.config.tv_audio_endpoint_id = selected.id.clone();
                     }
                 }
-                notes.push(format!("TV audio endpoint: {selected}"));
+                notes.push(format!("TV audio endpoint: {}", selected.name));
+                if selected.id.is_some() {
+                    notes.push("TV audio endpoint ID saved".to_string());
+                }
             } else {
-                notes.push(format!("Audio endpoints found: {}", names.join(", ")));
+                let names = devices
+                    .iter()
+                    .map(|device| device.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                notes.push(format!("Audio endpoints found: {names}"));
             }
         }
         Ok(_) => notes.push("Audio endpoint scan found no active output devices".to_string()),
@@ -598,17 +632,26 @@ fn send_wake_on_lan(mac: [u8; 6], broadcast: &str, port: u16) -> std::io::Result
 
 fn apply_pc_mode_from_state() {
     match run_embedded_display_config_script(embedded_pc_mode_script()) {
-        Ok(()) => set_status("PC mode applied"),
+        Ok(()) => {
+            set_status("PC mode applied");
+            apply_pc_audio_from_state();
+        }
         Err(script_error) => {
             log_message(&format!(
                 "Embedded PC mode failed, trying native fallback: {script_error}"
             ));
             match apply_pc_mode_native() {
-                Ok(()) => set_status("PC mode applied with native DisplayConfig"),
+                Ok(()) => {
+                    set_status("PC mode applied with native DisplayConfig");
+                    apply_pc_audio_from_state();
+                }
                 Err(error) => {
                     log_message(&format!("Native DisplayConfig apply failed, trying ChangeDisplaySettingsEx fallback: {error}"));
                     match apply_pc_mode_change_display_settings() {
-                        Ok(()) => set_status("PC mode applied with ChangeDisplaySettingsEx"),
+                        Ok(()) => {
+                            set_status("PC mode applied with ChangeDisplaySettingsEx");
+                            apply_pc_audio_from_state();
+                        }
                         Err(fallback_error) => {
                             set_status(format!("Failed to apply PC mode: {fallback_error}"))
                         }
@@ -619,7 +662,117 @@ fn apply_pc_mode_from_state() {
     }
 }
 
+fn apply_pc_audio_from_state() {
+    let config = APP
+        .get()
+        .and_then(|state| state.lock().ok().map(|state| state.config.clone()));
+
+    let Some(config) = config else {
+        log_message("PC audio switch skipped: config unavailable");
+        return;
+    };
+
+    if !config.auto_switch_audio {
+        return;
+    }
+
+    let Some(name_filter) = config.pc_audio_device_name_contains.as_deref() else {
+        log_message("PC audio switch skipped: PcAudioDeviceNameContains is not configured");
+        return;
+    };
+
+    match set_default_audio_output(config.pc_audio_endpoint_id.as_deref(), name_filter) {
+        Ok(device_name) => set_status(format!("Default audio output restored to {device_name}")),
+        Err(error) => set_status(format!("Failed to restore PC audio output: {error}")),
+    }
+}
+
+fn remember_current_audio_before_tv_mode() {
+    let config = APP
+        .get()
+        .and_then(|state| state.lock().ok().map(|state| state.config.clone()));
+
+    let Some(config) = config else {
+        log_message("Previous PC audio capture skipped: config unavailable");
+        return;
+    };
+
+    if !config.auto_switch_audio {
+        return;
+    }
+
+    match get_default_audio_output_device() {
+        Ok(device) => {
+            if is_tv_audio_device(&device, &config) {
+                log_message("Previous PC audio capture skipped: current output is TV audio");
+                return;
+            }
+
+            save_config_value("PcAudioDeviceNameContains", &device.name);
+            save_config_value(
+                "PcAudioEndpointId",
+                device.id.as_deref().unwrap_or_default(),
+            );
+
+            if let Some(state) = APP.get() {
+                if let Ok(mut state) = state.lock() {
+                    state.config.pc_audio_device_name_contains = Some(device.name.clone());
+                    state.config.pc_audio_endpoint_id = device.id.clone();
+                }
+            }
+
+            log_message(&format!(
+                "Previous PC audio output remembered: {}",
+                device.name
+            ));
+        }
+        Err(error) => log_message(&format!("Previous PC audio capture failed: {error}")),
+    }
+}
+
+fn is_tv_audio_device(device: &audio::AudioOutputDevice, config: &AppConfig) -> bool {
+    if let (Some(current_id), Some(tv_id)) =
+        (device.id.as_deref(), config.tv_audio_endpoint_id.as_deref())
+    {
+        if !tv_id.trim().is_empty() && current_id.eq_ignore_ascii_case(tv_id) {
+            return true;
+        }
+    }
+
+    if let Some(tv_name) = config.tv_audio_device_name_contains.as_deref() {
+        let current = device
+            .name
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let tv = tv_name
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        return !tv.is_empty() && current.contains(&tv);
+    }
+
+    false
+}
+
 fn apply_tv_mode_from_state() {
+    apply_tv_mode_if_tv_is_on(true);
+}
+
+fn apply_tv_mode_if_tv_is_on(refresh_power: bool) {
+    if refresh_power {
+        check_and_apply_pc_mode_if_needed();
+    }
+
+    if current_tv_on() != Some(true) {
+        set_status("TV mode skipped: TV is not on");
+        return;
+    }
+
+    remember_current_audio_before_tv_mode();
+
     match run_embedded_display_config_script(embedded_tv_mode_script()) {
         Ok(()) => {
             set_status("TV mode applied");
@@ -648,14 +801,16 @@ fn apply_tv_audio_from_state() {
         return;
     };
 
-    match set_default_audio_output_by_name(name_filter) {
+    match set_default_audio_output(config.tv_audio_endpoint_id.as_deref(), name_filter) {
         Ok(device_name) => {
             set_status(format!("Default audio output set to {device_name}"));
             if config.try_enable_dolby_atmos {
                 set_status("Dolby Atmos auto-enable is not implemented; set it once in Windows spatial sound settings");
             }
         }
-        Err(error) => set_status(format!("Failed to switch TV audio output: {error}")),
+        Err(error) => {
+            set_status(format!("Failed to switch TV audio output: {error}"));
+        }
     }
 }
 
@@ -701,6 +856,7 @@ fn read_tv_power() -> Result<TvPower> {
             host,
             config.webos_port,
             config.webos_timeout,
+            config.webos_client_key.as_deref(),
         ));
     }
 
@@ -712,7 +868,7 @@ fn read_tv_power() -> Result<TvPower> {
 }
 
 unsafe fn add_tray_icon(hwnd: HWND) -> Result<()> {
-    let icon = LoadIconW(None, IDI_APPLICATION)?;
+    let icon = load_app_icon()?;
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
@@ -730,6 +886,12 @@ unsafe fn add_tray_icon(hwnd: HWND) -> Result<()> {
     } else {
         Err(Error::from_win32())
     }
+}
+
+unsafe fn load_app_icon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    let instance = GetModuleHandleW(None)?;
+    let resource_name = PCWSTR(APP_ICON_RESOURCE_ID as *const u16);
+    LoadIconW(HINSTANCE(instance.0), resource_name).or_else(|_| LoadIconW(None, IDI_APPLICATION))
 }
 
 unsafe fn remove_tray_icon(hwnd: HWND) {
@@ -754,6 +916,10 @@ unsafe fn show_tray_menu(hwnd: HWND) {
         Some(true) => "TV Power: Turn off",
         Some(false) => "TV Power: Turn on",
         None => "TV Power: Check and toggle",
+    };
+    let mode_action = match current_tv_on() {
+        Some(true) => (MENU_APPLY_PC, "Apply PC mode"),
+        _ => (MENU_APPLY_TV, "Apply TV mode"),
     };
     let auto_switch_flag = if auto_switch_displays() {
         MF_STRING | MF_CHECKED
@@ -795,8 +961,8 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     let _ = AppendMenuW(
         menu,
         MF_STRING,
-        MENU_APPLY_PC,
-        PCWSTR(wide("Apply PC mode").as_ptr()),
+        mode_action.0,
+        PCWSTR(wide(mode_action.1).as_ptr()),
     );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, PCWSTR(wide("Exit").as_ptr()));

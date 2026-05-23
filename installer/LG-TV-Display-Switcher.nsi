@@ -23,12 +23,18 @@ RequestExecutionLevel user
 !define ENSURE_DISPLAY_CONFIG "installer\EnsureDisplayConfig.ps1"
 !endif
 
+!ifndef ICON_FILE
+!define ICON_FILE "assets\app-icon.ico"
+!endif
+
 !ifndef INSTALLER_OUTPUT
 !define INSTALLER_OUTPUT "dist\${APP_NAME}-Setup.exe"
 !endif
 
 Name "${APP_NAME}"
 OutFile "${INSTALLER_OUTPUT}"
+Icon "${ICON_FILE}"
+UninstallIcon "${ICON_FILE}"
 InstallDir "$LOCALAPPDATA\${APP_NAME}"
 InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
 

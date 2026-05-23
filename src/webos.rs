@@ -296,7 +296,12 @@ pub(crate) fn pair_webos_tv(
     let mut stream = connect_webos_socket(host, port, timeout)?;
     register_webos_client(&mut *stream, existing_key)
 }
-pub(crate) fn read_webos_power(host: &str, port: u16, timeout: Duration) -> TvPower {
+pub(crate) fn read_webos_power(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    client_key: Option<&str>,
+) -> TvPower {
     let address = format!("{host}:{port}");
     let Ok(mut addrs) = address.to_socket_addrs() else {
         return TvPower::NotOn {
@@ -315,7 +320,7 @@ pub(crate) fn read_webos_power(host: &str, port: u16, timeout: Duration) -> TvPo
     let mut stream = match TcpStream::connect_timeout(&socket_addr, timeout) {
         Ok(stream) => {
             if port == 3001 {
-                return read_webos_power_tls(host, port, timeout, stream);
+                return read_webos_power_tls(host, port, timeout, stream, client_key);
             }
             stream
         }
@@ -355,7 +360,7 @@ pub(crate) fn read_webos_power(host: &str, port: u16, timeout: Duration) -> TvPo
             if response_text.starts_with("HTTP/1.1 101")
                 || response_text.starts_with("HTTP/1.0 101")
             {
-                TvPower::On
+                read_webos_power_state_or_assume_on(&mut stream, client_key)
             } else {
                 TvPower::NotOn {
                     code: None,
@@ -379,6 +384,7 @@ pub(crate) fn read_webos_power_tls(
     port: u16,
     timeout: Duration,
     stream: TcpStream,
+    client_key: Option<&str>,
 ) -> TvPower {
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
@@ -432,7 +438,7 @@ pub(crate) fn read_webos_power_tls(
             if response_text.starts_with("HTTP/1.1 101")
                 || response_text.starts_with("HTTP/1.0 101")
             {
-                TvPower::On
+                read_webos_power_state_or_assume_on(&mut tls, client_key)
             } else {
                 TvPower::NotOn {
                     code: None,
@@ -449,4 +455,115 @@ pub(crate) fn read_webos_power_tls(
             reason: format!("webOS TLS handshake timed out or failed: {error}"),
         },
     }
+}
+
+fn read_webos_power_state_or_assume_on(
+    stream: &mut dyn ReadWrite,
+    client_key: Option<&str>,
+) -> TvPower {
+    let Some(client_key) = client_key else {
+        return TvPower::On;
+    };
+
+    if let Err(error) = register_webos_client(stream, Some(client_key)) {
+        return TvPower::NotOn {
+            code: None,
+            reason: format!("webOS power-state registration failed: {error}"),
+        };
+    }
+
+    let request = json!({
+        "id": "power_state",
+        "type": "request",
+        "uri": "ssap://com.webos.service.tvpower/power/getPowerState",
+        "payload": {}
+    });
+
+    if let Err(error) = send_ws_text(stream, &request.to_string()) {
+        return TvPower::NotOn {
+            code: None,
+            reason: format!("webOS power-state request failed: {error}"),
+        };
+    }
+
+    for _ in 0..10 {
+        let message = match read_ws_text(stream) {
+            Ok(message) => message,
+            Err(error) => {
+                return TvPower::NotOn {
+                    code: None,
+                    reason: format!("webOS power-state read failed: {error}"),
+                };
+            }
+        };
+
+        let Ok(value) = serde_json::from_str::<Value>(&message) else {
+            continue;
+        };
+
+        if value.get("id").and_then(Value::as_str) != Some("power_state") {
+            continue;
+        }
+
+        if value.get("type").and_then(Value::as_str) == Some("error") {
+            return TvPower::NotOn {
+                code: value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .and_then(parse_webos_error_code),
+                reason: format!("webOS power-state error: {value}"),
+            };
+        }
+
+        let payload = value.get("payload").unwrap_or(&value);
+        if let Some(state) = power_state_from_payload(payload) {
+            return tv_power_from_webos_state(&state);
+        }
+
+        return TvPower::On;
+    }
+
+    TvPower::NotOn {
+        code: None,
+        reason: "webOS power-state response timed out".to_string(),
+    }
+}
+
+fn power_state_from_payload(payload: &Value) -> Option<String> {
+    for key in ["state", "powerState", "power_state"] {
+        if let Some(state) = payload.get(key).and_then(Value::as_str) {
+            return Some(state.to_string());
+        }
+    }
+    None
+}
+
+fn tv_power_from_webos_state(state: &str) -> TvPower {
+    let normalized = state
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    if normalized.contains("active") || normalized == "on" || normalized.contains("screenon") {
+        TvPower::On
+    } else if normalized.contains("standby")
+        || normalized.contains("suspend")
+        || normalized.contains("poweroff")
+        || normalized == "off"
+    {
+        TvPower::NotOn {
+            code: None,
+            reason: format!("webOS power state {state}"),
+        }
+    } else {
+        TvPower::On
+    }
+}
+
+fn parse_webos_error_code(error: &str) -> Option<u32> {
+    error
+        .split_whitespace()
+        .next()
+        .and_then(|code| code.parse::<u32>().ok())
 }

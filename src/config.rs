@@ -18,6 +18,9 @@ pub(crate) struct AppConfig {
     pub(crate) wake_port: u16,
     pub(crate) webos_client_key: Option<String>,
     pub(crate) auto_switch_audio: bool,
+    pub(crate) pc_audio_endpoint_id: Option<String>,
+    pub(crate) pc_audio_device_name_contains: Option<String>,
+    pub(crate) tv_audio_endpoint_id: Option<String>,
     pub(crate) tv_audio_device_name_contains: Option<String>,
     pub(crate) try_enable_dolby_atmos: bool,
 }
@@ -35,6 +38,9 @@ impl Default for AppConfig {
             wake_port: 9,
             webos_client_key: None,
             auto_switch_audio: true,
+            pc_audio_endpoint_id: None,
+            pc_audio_device_name_contains: None,
+            tv_audio_endpoint_id: None,
             tv_audio_device_name_contains: Some("NVIDIA High Definition Audio".to_string()),
             try_enable_dolby_atmos: false,
         }
@@ -118,6 +124,16 @@ pub(crate) fn load_or_create_config(base_dir: &Path) -> AppConfig {
                     "1" | "yes" | "true" | "on"
                 );
             }
+            "pcaudioendpointid" => {
+                config.pc_audio_endpoint_id = (!value.is_empty()).then(|| value.to_string());
+            }
+            "pcaudiodevicenamecontains" => {
+                config.pc_audio_device_name_contains =
+                    (!value.is_empty()).then(|| value.to_string());
+            }
+            "tvaudioendpointid" => {
+                config.tv_audio_endpoint_id = (!value.is_empty()).then(|| value.to_string());
+            }
             "tvaudiodevicenamecontains" => {
                 config.tv_audio_device_name_contains =
                     (!value.is_empty()).then(|| value.to_string());
@@ -186,6 +202,9 @@ fn default_config_template() -> String {
         "WakePort=9",
         "WebOsClientKey=",
         "AutoSwitchAudio=true",
+        "PcAudioEndpointId=",
+        "PcAudioDeviceNameContains=",
+        "TvAudioEndpointId=",
         "TvAudioDeviceNameContains=NVIDIA High Definition Audio",
         "TryEnableDolbyAtmos=false",
         "",
