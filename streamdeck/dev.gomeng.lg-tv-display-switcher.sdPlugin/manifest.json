@@ -1,0 +1,76 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Actions": [
+    {
+      "Icon": "imgs/actions/power",
+      "Name": "TV Power Toggle",
+      "States": [
+        {
+          "Image": "imgs/actions/power",
+          "Title": "TV Power"
+        }
+      ],
+      "Tooltip": "Toggle the LG TV power using LG-TV-Display-Switcher.",
+      "UUID": "dev.gomeng.lg-tv-display-switcher.tv-power-toggle"
+    },
+    {
+      "Icon": "imgs/actions/tv-mode",
+      "Name": "Apply TV Mode",
+      "States": [
+        {
+          "Image": "imgs/actions/tv-mode",
+          "Title": "TV Mode"
+        }
+      ],
+      "Tooltip": "Switch displays and audio to TV mode.",
+      "UUID": "dev.gomeng.lg-tv-display-switcher.apply-tv-mode"
+    },
+    {
+      "Icon": "imgs/actions/pc-mode",
+      "Name": "Apply PC Mode",
+      "States": [
+        {
+          "Image": "imgs/actions/pc-mode",
+          "Title": "PC Mode"
+        }
+      ],
+      "Tooltip": "Switch displays and audio back to PC mode.",
+      "UUID": "dev.gomeng.lg-tv-display-switcher.apply-pc-mode"
+    },
+    {
+      "Icon": "imgs/actions/auto-switch",
+      "Name": "Toggle Auto Switch",
+      "States": [
+        {
+          "Image": "imgs/actions/auto-switch",
+          "Title": "Auto"
+        }
+      ],
+      "Tooltip": "Toggle automatic switching when TV power changes.",
+      "UUID": "dev.gomeng.lg-tv-display-switcher.toggle-auto-switch"
+    }
+  ],
+  "Author": "gomeng-dev",
+  "Category": "LG TV Display Switcher",
+  "CodePath": "bin/plugin.js",
+  "Description": "Control LG TV display, power, and audio switching through the LG-TV-Display-Switcher companion app.",
+  "Icon": "imgs/plugin-icon",
+  "Name": "LG TV Display Switcher",
+  "Nodejs": {
+    "Version": "20"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "SDKVersion": 3,
+  "Software": {
+    "MinimumVersion": "7.1"
+  },
+  "SupportURL": "https://github.com/gomeng-dev/LG-TV-Display-Switcher/issues",
+  "URL": "https://github.com/gomeng-dev/LG-TV-Display-Switcher",
+  "UUID": "dev.gomeng.lg-tv-display-switcher",
+  "Version": "0.1.4.0"
+}

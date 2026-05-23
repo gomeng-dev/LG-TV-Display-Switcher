@@ -8,6 +8,16 @@ uses `Unreleased`.
 
 ## [Unreleased]
 
+### Added
+
+- Add a companion Stream Deck plugin with TV power, TV mode, PC mode, and auto-switch actions.
+- Add a Stream Deck JSON CLI interface to the Windows app for companion plugin control.
+
+### Changed
+
+- Include the packaged `.streamDeckPlugin` in GitHub release artifacts.
+- Package the Stream Deck plugin with SDK v3 compatibility for Marketplace DRM processing.
+
 ## [v0.1.4]
 
 ### Added

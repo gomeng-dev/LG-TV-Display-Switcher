@@ -2,6 +2,9 @@
 /target/
 /dist/
 
+# Stream Deck plugin local dependencies
+/streamdeck/**/node_modules/
+
 # Built binaries and installer artifacts
 /*.exe
 /*.pdb

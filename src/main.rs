@@ -26,8 +26,11 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use webos::{pair_webos_tv, read_webos_power, turn_off_webos_tv};
 
+use serde_json::json;
 use windows::core::{Error, Result, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Storage::FileSystem::WriteFile;
+use windows::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -94,6 +97,17 @@ fn main() -> Result<()> {
     }))
     .ok();
 
+    if let Some(request) = streamdeck_cli_command() {
+        let exit_code = match request {
+            Ok(command) => run_streamdeck_cli(&command),
+            Err(error) => {
+                print_streamdeck_json(false, &error);
+                2
+            }
+        };
+        std::process::exit(exit_code);
+    }
+
     unsafe {
         let instance = GetModuleHandleW(None)?;
         let class_name = wide("LgTvDisplaySwitcherWindow");
@@ -139,6 +153,104 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn streamdeck_cli_command() -> Option<std::result::Result<String, String>> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let index = args.iter().position(|arg| arg == "--streamdeck")?;
+    let Some(command) = args.get(index + 1) else {
+        return Some(Err(
+            "Usage: LG-TV-Display-Switcher.exe --streamdeck <command> --json".to_string(),
+        ));
+    };
+
+    if !args.iter().any(|arg| arg == "--json") {
+        return Some(Err("Missing required --json flag".to_string()));
+    }
+
+    Some(Ok(command.clone()))
+}
+
+fn run_streamdeck_cli(command: &str) -> i32 {
+    let result = match command {
+        "status" => {
+            refresh_tv_power_status(false);
+            Ok(())
+        }
+        "apply-tv-mode" => streamdeck_apply_tv_mode(),
+        "apply-pc-mode" => {
+            apply_pc_mode_from_state();
+            status_result()
+        }
+        "toggle-tv-power" => {
+            toggle_tv_power_from_state();
+            status_result()
+        }
+        "toggle-auto-switch" => {
+            toggle_auto_switch_displays();
+            status_result()
+        }
+        _ => {
+            print_streamdeck_json(false, &format!("Unknown Stream Deck command: {command}"));
+            return 2;
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            print_streamdeck_json(true, "");
+            0
+        }
+        Err(error) => {
+            print_streamdeck_json(false, &error);
+            1
+        }
+    }
+}
+
+fn streamdeck_apply_tv_mode() -> std::result::Result<(), String> {
+    refresh_tv_power_status(false);
+    if current_tv_on() != Some(true) {
+        set_status("TV mode skipped: TV is not on");
+        return Err("TV is not on".to_string());
+    }
+
+    apply_tv_mode_if_tv_is_on(false);
+    status_result()
+}
+
+fn status_result() -> std::result::Result<(), String> {
+    let status = current_status();
+    if status.to_ascii_lowercase().contains("failed") {
+        Err(status)
+    } else {
+        Ok(())
+    }
+}
+
+fn print_streamdeck_json(ok: bool, error: &str) {
+    let payload = json!({
+        "ok": ok,
+        "status": current_status(),
+        "tvOn": current_tv_on(),
+        "autoSwitchDisplays": auto_switch_displays(),
+        "installRequired": false,
+        "error": if error.is_empty() { serde_json::Value::Null } else { json!(error) },
+    });
+    write_stdout_line(&payload.to_string());
+}
+
+fn write_stdout_line(line: &str) {
+    let mut output = String::with_capacity(line.len() + 2);
+    output.push_str(line);
+    output.push_str("\r\n");
+
+    unsafe {
+        if let Ok(stdout) = GetStdHandle(STD_OUTPUT_HANDLE) {
+            let mut written = 0;
+            let _ = WriteFile(stdout, Some(output.as_bytes()), Some(&mut written), None);
+        }
+    }
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -195,18 +307,23 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn check_and_apply_pc_mode_if_needed() {
+    refresh_tv_power_status(true);
+}
+
+fn refresh_tv_power_status(apply_auto_switch: bool) {
     match read_tv_power() {
         Ok(TvPower::OutputInactive) => update_tv_state(
             false,
             "DISPLAY3 inactive; PC mode already likely active".to_string(),
+            apply_auto_switch,
         ),
-        Ok(TvPower::On) => update_tv_state(true, "TV is on".to_string()),
+        Ok(TvPower::On) => update_tv_state(true, "TV is on".to_string(), apply_auto_switch),
         Ok(TvPower::NotOn { code, reason }) => {
             let status = match code {
                 Some(value) => format!("TV is not on ({reason}, code {value})"),
                 None => format!("TV is not on ({reason})"),
             };
-            update_tv_state(false, status);
+            update_tv_state(false, status, apply_auto_switch);
         }
         Err(error) => {
             set_status(format!("TV power check failed: {error}"));
@@ -214,7 +331,7 @@ fn check_and_apply_pc_mode_if_needed() {
     }
 }
 
-fn update_tv_state(tv_on: bool, status: String) {
+fn update_tv_state(tv_on: bool, status: String, apply_auto_switch: bool) {
     let (auto_switch, previous) = APP
         .get()
         .and_then(|state| {
@@ -228,7 +345,7 @@ fn update_tv_state(tv_on: bool, status: String) {
 
     set_status(status);
 
-    if auto_switch && previous.is_some() && previous != Some(tv_on) {
+    if apply_auto_switch && auto_switch && previous.is_some() && previous != Some(tv_on) {
         if tv_on {
             apply_tv_mode_if_tv_is_on(false);
         } else {

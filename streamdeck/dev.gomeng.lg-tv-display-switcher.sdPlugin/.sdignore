@@ -1,0 +1,6 @@
+node_modules/
+src/
+package.json
+pnpm-lock.yaml
+tsconfig.json
+*.log

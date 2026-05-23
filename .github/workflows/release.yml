@@ -23,6 +23,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: streamdeck/dev.gomeng.lg-tv-display-switcher.sdPlugin/pnpm-lock.yaml
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
@@ -52,6 +59,19 @@ jobs:
           $installerOutput = Join-Path (Resolve-Path dist).Path "LG-TV-Display-Switcher-Setup.exe"
           & $makensis "/DAPP_BINARY=$appBinary" "/DDEFAULT_CONFIG=$defaultConfig" "/DENSURE_DISPLAY_CONFIG=$ensureDisplayConfig" "/DICON_FILE=$iconFile" "/DINSTALLER_OUTPUT=$installerOutput" installer/LG-TV-Display-Switcher.nsi
 
+      - name: Build Stream Deck plugin
+        shell: pwsh
+        run: |
+          corepack enable
+          Push-Location streamdeck/dev.gomeng.lg-tv-display-switcher.sdPlugin
+          pnpm install --frozen-lockfile
+          pnpm run check
+          pnpm run build
+          Pop-Location
+          $refName = "${{ github.ref_name }}"
+          $pluginVersion = if ($refName -match '^v?(\d+\.\d+\.\d+)$') { "$($Matches[1]).0" } else { "0.1.4.0" }
+          pnpm --package=@elgato/cli dlx streamdeck pack streamdeck/dev.gomeng.lg-tv-display-switcher.sdPlugin --output dist --force --no-update-check --version $pluginVersion
+
       - name: Stage artifacts
         shell: pwsh
         run: |
@@ -74,6 +94,7 @@ jobs:
             dist/LG-TV-Display-Switcher.exe
             dist/LG-TV-Display-Switcher-Setup.exe
             dist/LG-TV-Display-Switcher-windows-x64.zip
+            dist/dev.gomeng.lg-tv-display-switcher.streamDeckPlugin
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
@@ -84,3 +105,4 @@ jobs:
             dist/LG-TV-Display-Switcher.exe
             dist/LG-TV-Display-Switcher-Setup.exe
             dist/LG-TV-Display-Switcher-windows-x64.zip
+            dist/dev.gomeng.lg-tv-display-switcher.streamDeckPlugin
